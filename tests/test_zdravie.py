@@ -25,8 +25,8 @@ class FakeWatch(unittest.TestCase):
         nights = self.health["nights"]
         self.assertEqual(len(nights), 8)
         n = nights[0]
-        # The fake plan: 5 cycles, 22 min awake in 3 runs, 12 min before falling asleep.
-        self.assertEqual((n["deep"] // 60, n["rem"] // 60, n["light"] // 60, n["awake"] // 60), (115, 110, 200, 22))
+        # The fake plan: 5 cycles, 26 min awake in 3 runs, 12 min before falling asleep.
+        self.assertEqual((n["deep"] // 60, n["rem"] // 60, n["light"] // 60, n["awake"] // 60), (115, 110, 200, 26))
         self.assertEqual(n["awakenings"], 1)
         self.assertEqual(n["onset"] - n["start"], 12 * 60)
 
@@ -70,7 +70,8 @@ from fit_tool.profile.messages.monitoring_info_message import MonitoringInfoMess
 from fit_tool.profile.messages.monitoring_message import MonitoringMessage
 from fit_tool.profile.messages.sleep_assessment_message import SleepAssessmentMessage
 from fit_tool.profile.messages.sleep_level_message import SleepLevelMessage
-from fit_tool.profile.profile_type import SleepLevel
+from fit_tool.profile.messages.event_message import EventMessage
+from fit_tool.profile.profile_type import EventType, SleepLevel
 import fitimport, metrics, zdravie
 
 TZ = ZoneInfo("Europe/Bratislava")
@@ -78,9 +79,12 @@ TZ = ZoneInfo("Europe/Bratislava")
 def at(day, hh, mm=0):
     return datetime(2026, 11, day, hh, mm, tzinfo=TZ)
 
-def sleep_file(path, stages, assessment=None):
-    """stages: [(datetime, SleepLevel)], written as Garmin's change records."""
+def sleep_file(path, stages, assessment=None, window=None):
+    """stages: [(datetime, SleepLevel)], written as Garmin's change records; window: (start, stop) events."""
     b = FitFileBuilder(auto_define=True)
+    if window:
+        for t, kind in zip(window, (EventType.START, EventType.STOP)):
+            e = EventMessage(); e.timestamp = int(t.timestamp() * 1000); e.event = 74; e.event_type = kind; b.add(e)
     for t, lv in stages:
         m = SleepLevelMessage(); m.timestamp = int(t.timestamp() * 1000); m.sleep_level = lv; b.add(m)
     if assessment:
@@ -102,6 +106,16 @@ class Base(unittest.TestCase):
         return metrics.sleeps(self.db)
 
 class Edges(Base):
+    def test_instinct_2_records_name_the_time_before_them(self):
+        # The Instinct 2's shape: a window, and each record ending the stretch it names, the last on the stop.
+        sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),
+                                        (at(11, 0, 10), SleepLevel.AWAKE), (at(11, 1), SleepLevel.REM)],
+                   window=(at(10, 22, 48), at(11, 1)))
+        [s] = self.load("a.fit")
+        self.assertEqual((s["light"], s["deep"], s["awake"], s["rem"]), (12 * 60, 3600, 600, 50 * 60))
+        self.assertEqual((s["start"], s["end"], s["wake"]), (int(at(10, 22, 48).timestamp()), int(at(11, 1).timestamp()), int(at(11, 1).timestamp())))
+        self.assertEqual(s["awakenings"], 1)
+
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),
                                         (at(11, 1), SleepLevel.REM), (at(11, 2), SleepLevel.AWAKE)])

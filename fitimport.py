@@ -5,6 +5,7 @@ Connect sync and when its memory fills), and its messages become time series in 
 
     hr        heart rate, bpm (all-day monitoring and activity records)
     sleep     sleep level: 0 unmeasurable, 1 awake, 2 light, 3 deep, 4 REM (Garmin's own staging)
+    sleep_window  1 where the watch's sleep window starts, 0 where it stops
     stress    Garmin stress 0-100 (derived by the watch from HRV)
     resp      respiration rate, breaths/min
     spo2      pulse oximetry, %
@@ -63,7 +64,9 @@ def rows(messages):
         if isinstance(m.get("timestamp"), int):
             last = m["timestamp"]
         elif num == MONITORING and m.get("timestamp_16") is not None and last is not None:
-            last += (int(m["timestamp_16"]) - last) & 0xFFFF
+            # Signed: a record may be a little older than the event logged before it (Instinct 2).
+            delta = (int(m["timestamp_16"]) - last) & 0xFFFF
+            last += delta - 0x10000 if delta >= 0x8000 else delta
         if num != MONITORING or last is None or (m.get("timestamp") is None and m.get("timestamp_16") is None):
             continue
         if m.get("heart_rate"):
@@ -92,6 +95,10 @@ def rows(messages):
             level = {"unmeasurable": 0, "awake": 1, "light": 2, "deep": 3, "rem": 4}.get(level)
         if m.get("timestamp") is not None and level is not None:
             add("sleep", unix(m["timestamp"]), level)
+    for m in messages.get("event_mesgs", []):
+        # Event 74 marks where the watch's sleep window starts and stops.
+        if m.get("event") in (74, "sleep") and m.get("timestamp") is not None and m.get("event_type") in ("start", "stop"):
+            add("sleep_window", unix(m["timestamp"]), 1 if m["event_type"] == "start" else 0)
     for m in messages.get("hrv_status_summary_mesgs", []):
         if m.get("timestamp") is not None and m.get("last_night_average"):
             add("hrv", unix(m["timestamp"]), m["last_night_average"])

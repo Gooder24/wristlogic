@@ -14,7 +14,7 @@ docstring of `metrics.py` names each method.
     zdravie dni 14       a table of the last days
     zdravie import [DIR] from the watch, or from a folder of FIT files (e.g. a Garmin export)
 
-Setup on asus: `sudo ./install.sh root` once (jmtpfs, udev rule), then `./install.sh`. Settings in
+Setup on asus: `sudo ./install.sh root` once (jmtpfs, mtools, udev rule), then `./install.sh`. Settings in
 `~/.config/zdravie/config.json`: `need_hours` (8), `birth_year` (for maximum heart rate; otherwise the
 highest one seen, at least 195).
 

@@ -50,7 +50,7 @@ def night_lines(n, day=None):
              f"(zaspatie {t(n['onset']):%H:%M}, prebudenie {t(n['wake']):%H:%M}, "
              f"efektivita {round(100 * n['asleep'] / max(1, n['end'] - n['start']))} %)",
              f"Hlboký {hm(n['deep'])} · ľahký {hm(n['light'])} · REM {hm(n['rem'])} · bdenie {hm(n['awake'])}"
-             + (f" ({n['awakenings']}× prebudený)" if n["awakenings"] else "")]
+             + (f" ({woke}× prebudený)" if (woke := (n.get("garmin") or {}).get("awakenings_count", n["awakenings"])) else "")]
     g = n.get("garmin") or {}
     if g.get("overall_sleep_score") is not None:
         sub = [f"{name} {g[k]}" for k, name in (("sleep_quality_score", "kvalita"), ("sleep_recovery_score", "zotavenie"))
@@ -64,7 +64,9 @@ def night_lines(n, day=None):
     if n["resp"]: body.append(f"dych {num(n['resp'], 1)}/min" + (f" (bežne {num(n['base']['resp'], 1)})" if n.get("base", {}).get("resp") else ""))
     if n["stress"] is not None: body.append(f"stres v spánku {round(n['stress'])}")
     if n["spo2"]: body.append(f"SpO₂ {round(n['spo2'])} %")
-    if body: lines.append(", ".join(body).capitalize())
+    if body:
+        text = ", ".join(body)
+        lines.append(text[0].upper() + text[1:])
     if n.get("main"):
         rec = n.get("recovery")
         lines.append(f"Zotavenie {rec} % (odhad podľa tvojho priemeru)" if rec is not None
@@ -152,7 +154,8 @@ def publish(con):
     public = DATA / "public"
     public.mkdir(parents=True, exist_ok=True)
     write(public / "spanok.ics", ics(nights, days))
-    write(public / "health.json", json.dumps({"nights": nights, "days": days}, ensure_ascii=False))
+    plain = [{k: v for k, v in n.items() if k != "spans"} for n in nights]
+    write(public / "health.json", json.dumps({"nights": plain, "days": days}, ensure_ascii=False))
     return nights, days
 
 # ------------------------------------------------------------------ import
@@ -163,7 +166,7 @@ def import_watch(con):
         return None
     archive = DATA / "fit" / (serials[0] or "garmin")
     kept = []
-    with device.mounted(DATA / "mnt") as root:
+    with device.opened(DATA / "mnt") as root:
         for src, rel in device.fit_files(root):
             kept.append((fitimport.keep_copy(src, archive, rel)[1], f"{archive.name}/{rel}"))
     return fitimport.import_files(con, kept)
@@ -189,7 +192,8 @@ def main(argv):
             for c in new.values():
                 for k, v in c.items():
                     if k != "error": totals[k] = totals.get(k, 0) + v
-            if totals: print("Správy: " + ", ".join(f"{k.removesuffix('_mesgs')} {v}" for k, v in sorted(totals.items())))
+            known = {k.removesuffix("_mesgs"): v for k, v in totals.items() if not k.isdigit()}
+            if known: print("Správy: " + ", ".join(f"{k} {v}" for k, v in sorted(known.items())))
         return 0
     if cmd == "publish":
         publish(con); return 0

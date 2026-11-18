@@ -12,7 +12,7 @@ Sleep stages and Garmin's sleep score come from the watch. On top of them:
 - daily load: Edwards' TRIMP (minutes in five zones weighted 1-5), with the zones taken from heart rate
   reserve (50-60-70-80-90 %, Karvonen) because it runs over the whole day and not one workout; strain on a
   0-21 scale as a log of it; Banister's fitness-fatigue model: fitness (42-day mean), fatigue (7-day), form =
-  the difference, shown once there are 28 days of data
+  the difference, shown once the watch was worn at least 12 hours on 28 days
 - an illness flag when resting heart rate and respiration both rise well above baseline (Mishra et al. 2020,
   Nature Biomedical Engineering; Whoop and Oura use the same signals)
 """
@@ -25,6 +25,7 @@ AWAKE, LIGHT, DEEP, REM = 1, 2, 3, 4
 SPLIT = 12 * 3600      # a sleep level never stands longer than this
 NAP_MIN = 20 * 60      # shorter sleeps are not shown
 CAP = 5 * 60           # a sample stands for at most this long when the next one is late
+AWAKENING = 6 * 60     # shorter awake stretches are not counted as waking up
 
 def local(ts):
     return datetime.fromtimestamp(ts, TZ)
@@ -48,46 +49,72 @@ def weighted(points, end=None, cap=CAP):
 def sleeps(db):
     """Every sleep the watch staged, oldest first.
 
-    Garmin writes a sleep level either every minute (dense) or only when the stage changes (sparse); each file is
-    read the way it is written. Dense: a level stands for at most two of its steps, and half an hour with no
-    samples (off the wrist, or a nap before the night) starts a new sleep. Sparse: a level holds until the next
-    record, and a new sleep starts half an hour after an awake record, or after half a day."""
+    A sleep file of the Instinct 2 holds the window the watch slept in (start and stop events) and a sleep level at
+    every change of stage; each level holds until the next record or the stop. Files without a window are grouped
+    by their samples: dense ones (a level every minute) hold a level for at most two steps and split at half an
+    hour with no samples; sparse ones hold it until the next record and split only where another file begins half
+    an hour after an awake record, or after half a day."""
     points = db.execute("select ts, value, src from samples where kind = 'sleep' order by ts").fetchall()
+    marks = db.execute("select ts, value, src from samples where kind = 'sleep_window' order by ts").fetchall()
+    windows = {}
+    for ts, v, src in marks:
+        if v == 1: windows.setdefault(src, []).append([ts, None])
+        elif windows.get(src) and windows[src][-1][1] is None: windows[src][-1][1] = ts
     by_src = {}
     for ts, _, src in points: by_src.setdefault(src, []).append(ts)
     step = {src: int(statistics.median([b - a for a, b in zip(t, t[1:])] or [60])) for src, t in by_src.items()}
     cap = {src: (max(60, 2 * st) if st <= 120 else SPLIT) for src, st in step.items()}
-    groups, cur = [], []
+    groups, cur, bounds = [], [], []
     for p in points:
+        win = next((w for w in windows.get(p[2], []) if w[1] and w[0] <= p[0] <= w[1]), None)
+        if win:
+            if not groups or bounds[-1] is not win:
+                groups.append([]); bounds.append(win)
+            cur = []
+            groups[-1].append(p)
+            continue
         gap = p[0] - cur[-1][0] if cur else 0
         dense = cur and cap[cur[-1][2]] < SPLIT
-        if cur and (gap > SPLIT or (gap > 1800 and (dense or int(cur[-1][1]) == AWAKE))):
-            groups.append(cur); cur = []
+        if cur and (gap > SPLIT or (gap > 1800 and (dense or (p[2] != cur[-1][2] and int(cur[-1][1]) == AWAKE)))):
+            cur = []
+        if not cur:
+            groups.append(cur); bounds.append(None)
         cur.append(p)
-    if cur: groups.append(cur)
     out = []
-    for g in groups:
+    for g, win in zip(groups, bounds):
         limit = max(cap[src] for _, _, src in g)
-        end = g[-1][0] + min(step[g[-1][2]], 60)
+        end = win[1] if win else g[-1][0] + min(step[g[-1][2]], 60)
+        first = win[0] if win else g[0][0]
         g = [(ts, int(lv)) for ts, lv, _ in g]
+        if win:
+            # Within a window each record names the stage of the time since the previous one (the last record
+            # falls on the stop): read so, awake time and awakenings match Garmin's own assessment.
+            spans, prev = [], first
+            for ts, lv in g:
+                if ts > prev: spans.append((prev, lv, ts - prev))
+                prev = ts
+        else:
+            spans = weighted(g, end, cap=limit)
         stages = {AWAKE: 0, LIGHT: 0, DEEP: 0, REM: 0}
-        spans = weighted(g, end, cap=limit)
         for ts, level, secs in spans:
             if level in stages: stages[level] += secs
         asleep = stages[LIGHT] + stages[DEEP] + stages[REM]
         if asleep < NAP_MIN: continue
-        # In bed from the first to the last sample; awake time before falling and after the last waking counts in bed.
+        # In bed for the whole window; time awake before falling asleep and after the last waking counts in bed.
         sleeping = [(ts, secs) for ts, lv, secs in spans if lv in (LIGHT, DEEP, REM)]
-        awakenings, prev = 0, None
-        for ts, lv in g:
-            if lv == AWAKE and prev in (LIGHT, DEEP, REM) and sleeping[0][0] < ts < sleeping[-1][0]: awakenings += 1
-            if lv: prev = lv
+        # An awakening is at least AWAKENING awake between two stretches of sleep (Garmin counts only longer ones).
+        runs = []
+        for ts, lv, secs in spans:
+            if runs and runs[-1][1] == lv and runs[-1][0] + runs[-1][2] == ts: runs[-1][2] += secs
+            else: runs.append([ts, lv, secs])
+        awakenings = sum(1 for ts, lv, secs in runs
+                         if lv == AWAKE and secs >= AWAKENING and sleeping[0][0] < ts < sleeping[-1][0])
         onset, wake = sleeping[0][0], sleeping[-1][0] + sleeping[-1][1]
         # A short daytime sleep is a nap; a short sleep at night (a part of the night the watch has) is still the night.
         middle = local((onset + wake) // 2).hour
-        out.append({"start": g[0][0], "end": end, "asleep": asleep, "awake": stages[AWAKE], "light": stages[LIGHT],
+        out.append({"start": first, "end": end, "asleep": asleep, "awake": stages[AWAKE], "light": stages[LIGHT],
                     "deep": stages[DEEP], "rem": stages[REM], "awakenings": awakenings, "onset": onset, "wake": wake,
-                    "cap": limit, "main": asleep >= 3 * 3600 or not 9 <= middle < 20})
+                    "spans": spans, "main": asleep >= 3 * 3600 or not 9 <= middle < 20})
     # One night per night: of short night-time sleeps around the same midnight, only the longest is the night.
     night = lambda s: local((s["onset"] + s["wake"]) // 2 - 12 * 3600).date()
     longest = {}
@@ -137,8 +164,8 @@ def regularity(db, end, nights):
         for m in range(max(0, (ts - start) // 60 - 10), min(minutes, (ts - start) // 60 + 10)):
             state[m] = 0
     for s in nights:
-        # The whole sleep, so a stage that began before the window still covers its first minutes.
-        for ts, lv, secs in weighted(series(db, "sleep", s["start"], s["end"]), s["end"], cap=s["cap"]):
+        # The whole sleep, so a stage that began before the 7 days still covers their first minutes.
+        for ts, lv, secs in s["spans"]:
             first = (ts - start) // 60
             for m in range(max(0, first), min(minutes, first + max(1, secs // 60))):
                 state[m] = 1 if int(lv) in (LIGHT, DEEP, REM) else 0
@@ -217,7 +244,7 @@ def days(db, birth_year=None, rest=60):
     hmax = hr_max(db, birth_year)
     kinds = [k for (k,) in db.execute("select distinct kind from samples where kind like 'cycles:%'")]
     d, last = local(first[0]).date(), local(first[1]).date()
-    out, fitness, fatigue, begin = [], 0.0, 0.0, d
+    out, fitness, fatigue, worn_days = [], 0.0, 0.0, 0
     while d <= last:
         a, b = day_bounds(d)
         hr = series(db, "hr", a, b)
@@ -233,6 +260,7 @@ def days(db, birth_year=None, rest=60):
             if k.split(":", 1)[1] in ("walking", "running"):
                 row = db.execute("select max(value) from samples where kind = ? and ts >= ? and ts < ?", (k, a, b)).fetchone()
                 steps += int(row[0] or 0)
+        worn_days += worn >= 12 * 3600  # fitness and form mean something only after four weeks on the wrist
         fitness += (load - fitness) / 42
         fatigue += (load - fatigue) / 7
         stress = [v for _, v in series(db, "stress", a, b)]
@@ -241,7 +269,7 @@ def days(db, birth_year=None, rest=60):
                     "moderate_min": round(moderate / 60), "vigorous_min": round(vigorous / 60), "worn_h": round(worn / 3600, 1),
                     "stress": round(statistics.fmean(stress)) if stress else None,
                     **({"fitness": round(fitness), "fatigue": round(fatigue), "form": round(fitness - fatigue)}
-                       if (d - begin).days >= 28 else {"fitness": None, "fatigue": None, "form": None}),
+                       if worn_days >= 28 else {"fitness": None, "fatigue": None, "form": None}),
                     "vo2max": vo2[0] if vo2 else None, "hr_max": round(hmax)})
         d += timedelta(days=1)
     return out

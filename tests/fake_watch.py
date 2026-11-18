@@ -33,7 +33,7 @@ def night(day, ill):
     plan = [SleepLevel.AWAKE] * 12
     for cycle in range(5):
         plan += [SleepLevel.LIGHT] * 25 + [SleepLevel.DEEP] * (35 - cycle * 6) + [SleepLevel.LIGHT] * 15 + [SleepLevel.REM] * (10 + cycle * 6)
-        if cycle == 2: plan += [SleepLevel.AWAKE] * 4
+        if cycle == 2: plan += [SleepLevel.AWAKE] * 8
     plan += [SleepLevel.AWAKE] * 6
     b = builder(FileType.SLEEP if hasattr(FileType, "SLEEP") else 49)
     for i, lv in enumerate(plan):

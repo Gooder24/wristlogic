@@ -1,9 +1,9 @@
 #!/bin/sh
-# Sets zdravie up on asus. Once, as root: sudo ./install.sh root   (jmtpfs and the udev rule)
+# Sets zdravie up on asus. Once, as root: sudo ./install.sh root   (jmtpfs, mtools and the udev rule)
 set -eu
 cd "$(dirname "$0")"
 if [ "${1:-}" = root ]; then
-    apt-get install -y jmtpfs
+    apt-get install -y jmtpfs mtools
     install -m 644 60-garmin-zdravie.rules /etc/udev/rules.d/
     udevadm control --reload
     udevadm trigger --subsystem-match=usb --attr-match=idVendor=091e

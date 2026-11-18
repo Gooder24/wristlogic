@@ -1,3 +1,5 @@
-# Garmin watches over MTP for the plugdev group (a headless box has no seat for uaccess); plugging one in starts
-# zdravie's import in the user's systemd.
+# Garmin watches for the plugdev group (a headless box has no seat for uaccess); plugging one in starts zdravie's
+# import in the user's systemd. Newer watches speak MTP; the Instinct 2 is a USB disk, read with mtools
+# (read-only, never mounted).
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="091e", MODE="0660", GROUP="plugdev", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="zdravie-import.service"
+SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ATTRS{idVendor}=="091e", MODE="0640", GROUP="plugdev", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="zdravie-import.service"

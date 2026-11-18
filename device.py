@@ -1,5 +1,8 @@
-"""The Garmin watch on USB: find it, mount it over MTP (jmtpfs), copy its FIT files, unmount."""
-import subprocess, time
+"""The Garmin watch on USB: find it, open its files, copy its FIT files.
+
+The Instinct 2 is a small FAT disk: mtools reads it straight from the block device (read-only, never mounted,
+so nothing can write to the watch). Watches that speak MTP are mounted with jmtpfs instead."""
+import os, shutil, subprocess, tempfile, time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,6 +19,41 @@ def plugged():
         except OSError:
             pass
     return found
+
+def disk():
+    """/dev path of a Garmin USB disk, if one is plugged in."""
+    for block in Path("/sys/block").glob("sd*"):
+        node = block.resolve()
+        while node != node.parent:
+            vendor = node / "idVendor"
+            if vendor.exists():
+                if vendor.read_text().strip() == GARMIN:
+                    return f"/dev/{block.name}"
+                break
+            node = node.parent
+    return None
+
+@contextmanager
+def opened(where):
+    """A folder holding the watch's GARMIN/ tree, for as long as the block runs."""
+    # The disk appears a few seconds after the USB device.
+    for _ in range(10):
+        dev = disk()
+        if dev: break
+        time.sleep(2)
+    if not dev:
+        with mounted(where) as root:
+            yield root
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="garmin-", dir=Path(where).parent))
+    try:
+        p = subprocess.run(["mcopy", "-s", "-n", "-m", "-i", dev, "::/GARMIN", str(tmp)], capture_output=True, text=True,
+                           env={**os.environ, "MTOOLS_SKIP_CHECK": "1"})
+        if not (tmp / "GARMIN").is_dir():
+            raise RuntimeError(f"mtools could not read {dev}: {(p.stderr or p.stdout).strip()[-300:]}")
+        yield tmp
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 @contextmanager
 def mounted(where):

@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Bratislava")
 AWAKE, LIGHT, DEEP, REM = 1, 2, 3, 4
-SPLIT = 2 * 3600       # a gap this long between sleep samples starts another sleep
+SPLIT = 12 * 3600      # a sleep level never stands longer than this
 NAP_MIN = 20 * 60      # shorter sleeps are not shown
 CAP = 5 * 60           # a sample stands for at most this long when the next one is late
 
@@ -35,45 +35,58 @@ def series(db, kind, start=None, end=None):
     if end is not None: q += " and ts < ?"; args.append(end)
     return db.execute(q + " order by ts", args).fetchall()
 
-def weighted(points, end=None):
-    """(ts, value, seconds) with each sample standing until the next one, at most CAP."""
+def weighted(points, end=None, cap=CAP):
+    """(ts, value, seconds) with each sample standing until the next one, at most `cap`."""
     out = []
     for i, (ts, v) in enumerate(points):
         nxt = points[i + 1][0] if i + 1 < len(points) else (end if end is not None else ts + 60)
-        out.append((ts, v, max(0, min(nxt - ts, CAP))))
+        out.append((ts, v, max(0, min(nxt - ts, cap))))
     return out
 
 # ------------------------------------------------------------------ sleep
 
 def sleeps(db):
-    """Every sleep the watch staged, oldest first."""
-    points = series(db, "sleep")
+    """Every sleep the watch staged, oldest first.
+
+    A sleep level holds until the next one: Garmin writes one a minute or only the changes. A new sleep starts
+    after half an hour with nothing once the last level was awake, or where another file begins (a nap, then the
+    night), and always after half a day."""
+    points = db.execute("select ts, value, src from samples where kind = 'sleep' order by ts").fetchall()
     groups, cur = [], []
     for p in points:
-        if cur and p[0] - cur[-1][0] > SPLIT:
+        gap = p[0] - cur[-1][0] if cur else 0
+        if cur and (gap > 12 * 3600 or (gap > 1800 and (p[2] != cur[-1][2] or int(cur[-1][1]) in (0, AWAKE)))):
             groups.append(cur); cur = []
         cur.append(p)
     if cur: groups.append(cur)
     out = []
     for g in groups:
+        g = [(ts, int(lv)) for ts, lv, _ in g]
         steps = [b[0] - a[0] for a, b in zip(g, g[1:])]
-        step = int(statistics.median(steps)) if steps else 60
-        end = g[-1][0] + step
+        end = g[-1][0] + min(int(statistics.median(steps)) if steps else 60, 60)
         stages = {AWAKE: 0, LIGHT: 0, DEEP: 0, REM: 0}
-        for ts, level, secs in weighted(g, end):
-            if int(level) in stages: stages[int(level)] += secs
+        spans = weighted(g, end, cap=SPLIT)
+        for ts, level, secs in spans:
+            if level in stages: stages[level] += secs
         asleep = stages[LIGHT] + stages[DEEP] + stages[REM]
         if asleep < NAP_MIN: continue
         # In bed from the first to the last sample; awake time before falling and after the last waking counts in bed.
-        sleeping = [ts for ts, lv in g if int(lv) in (LIGHT, DEEP, REM)]
+        sleeping = [(ts, secs) for ts, lv, secs in spans if lv in (LIGHT, DEEP, REM)]
         awakenings, prev = 0, None
         for ts, lv in g:
-            lv = int(lv)
-            if lv == AWAKE and prev in (LIGHT, DEEP, REM) and sleeping[0] < ts < sleeping[-1]: awakenings += 1
+            if lv == AWAKE and prev in (LIGHT, DEEP, REM) and sleeping[0][0] < ts < sleeping[-1][0]: awakenings += 1
             if lv: prev = lv
+        onset, wake = sleeping[0][0], sleeping[-1][0] + sleeping[-1][1]
+        # A short daytime sleep is a nap; a short sleep at night (a part of the night the watch has) is still the night.
+        middle = local((onset + wake) // 2).hour
         out.append({"start": g[0][0], "end": end, "asleep": asleep, "awake": stages[AWAKE], "light": stages[LIGHT],
-                    "deep": stages[DEEP], "rem": stages[REM], "awakenings": awakenings,
-                    "onset": sleeping[0], "wake": sleeping[-1] + step})
+                    "deep": stages[DEEP], "rem": stages[REM], "awakenings": awakenings, "onset": onset, "wake": wake,
+                    "main": asleep >= 3 * 3600 or not 9 <= middle < 20})
+    # One night per night: of short night-time sleeps around the same midnight, only the longest is the night.
+    night = lambda s: local((s["onset"] + s["wake"]) // 2 - 12 * 3600).date()
+    for s in out:
+        if s["main"] and s["asleep"] < 3 * 3600:
+            s["main"] = not any(o is not s and o["main"] and night(o) == night(s) and o["asleep"] > s["asleep"] for o in out)
     return out
 
 def lowest_mean(points, window=1800, need=5):
@@ -113,7 +126,7 @@ def regularity(db, end, nights):
         for m in range(max(0, (ts - start) // 60 - 10), min(minutes, (ts - start) // 60 + 10)):
             state[m] = 0
     for s in nights:
-        for ts, lv, secs in weighted(series(db, "sleep", max(s["start"], start), min(s["end"], end)), s["end"]):
+        for ts, lv, secs in weighted(series(db, "sleep", max(s["start"], start), min(s["end"], end)), s["end"], cap=SPLIT):
             first = (ts - start) // 60
             for m in range(max(0, first), min(minutes, first + max(1, secs // 60))):
                 state[m] = 1 if int(lv) in (LIGHT, DEEP, REM) else 0
@@ -129,7 +142,6 @@ def nights(db, need_hours=8.0):
     for s in all_sleeps:
         hr = series(db, "hr", s["onset"], s["wake"])
         n = dict(s)
-        n["main"] = s["asleep"] >= 3 * 3600
         n["rhr"] = lowest_mean(hr)
         n["hr_avg"] = mean(hr)
         n["resp"] = mean(series(db, "resp", s["onset"], s["wake"]))

@@ -53,8 +53,9 @@ def night_lines(n, day=None):
              + (f" ({n['awakenings']}× prebudený)" if n["awakenings"] else "")]
     g = n.get("garmin") or {}
     if g.get("overall_sleep_score") is not None:
-        lines.append(f"Garmin skóre spánku {g['overall_sleep_score']}"
-                     + (f" (kvalita {g['sleep_quality_score']}, zotavenie {g['sleep_recovery_score']})" if g.get("sleep_quality_score") is not None else ""))
+        sub = [f"{name} {g[k]}" for k, name in (("sleep_quality_score", "kvalita"), ("sleep_recovery_score", "zotavenie"))
+               if g.get(k) is not None]
+        lines.append(f"Garmin skóre spánku {g['overall_sleep_score']}" + (f" ({', '.join(sub)})" if sub else ""))
     if n.get("need"):
         lines.append(f"Potreba {hm(n['need'])} · splnené {n['performance']} % · spánkový dlh za 7 dní {hm(n['debt'])}")
     body = []
@@ -164,7 +165,7 @@ def import_watch(con):
     kept = []
     with device.mounted(DATA / "mnt") as root:
         for src, rel in device.fit_files(root):
-            kept.append(fitimport.keep_copy(src, archive, rel)[1])
+            kept.append((fitimport.keep_copy(src, archive, rel)[1], str(rel)))
     return fitimport.import_files(con, kept)
 
 def main(argv):
@@ -174,7 +175,9 @@ def main(argv):
         with open(DATA / ".lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if len(argv) > 1:
-                new = fitimport.import_files(con, sorted(p for p in Path(argv[1]).rglob("*") if p.suffix.lower() == ".fit"))
+                root = Path(argv[1])
+                new = fitimport.import_files(con, sorted((p, str(p.relative_to(root))) for p in root.rglob("*")
+                                                         if p.suffix.lower() == ".fit"))
             else:
                 new = import_watch(con)
                 if new is None:

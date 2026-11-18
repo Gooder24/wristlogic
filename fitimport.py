@@ -23,9 +23,10 @@ FIT_EPOCH = 631065600  # 1989-12-31T00:00:00Z
 
 SCHEMA = """
 create table if not exists files (sha text primary key, path text not null, imported_at integer not null, counts text);
-create table if not exists samples (kind text not null, ts integer not null, value real not null, primary key (kind, ts)) without rowid;
-create table if not exists assess (ts integer primary key, data text not null);
-create table if not exists activities (start integer primary key, data text not null);
+create table if not exists samples (kind text not null, ts integer not null, value real not null, src text not null, primary key (kind, ts)) without rowid;
+create index if not exists samples_src on samples (src);
+create table if not exists assess (ts integer primary key, data text not null, src text not null);
+create table if not exists activities (start integer primary key, data text not null, src text not null);
 """
 
 def connect(path):
@@ -37,27 +38,33 @@ def unix(fit_ts):
     return int(fit_ts) + FIT_EPOCH
 
 def decode(path):
+    """Messages by type, plus every message in file order as (global number, message)."""
     stream = Stream.from_file(str(path))
+    ordered = []
     messages, errors = Decoder(stream).read(convert_datetimes_to_dates=False, convert_types_to_strings=True,
-                                            merge_heart_rates=False, expand_sub_fields=True)
+                                            merge_heart_rates=False, expand_sub_fields=True,
+                                            mesg_listener=lambda num, m: ordered.append((num, m)))
     if errors and not messages:
         raise ValueError(f"{path}: {errors[0]}")
+    messages["_ordered"] = ordered
     return messages
+
+MONITORING = 55
 
 def rows(messages):
     """(samples, assessments, activities) of one decoded file."""
     samples = []
     add = lambda kind, ts, value: value is not None and samples.append((kind, int(ts), float(value)))
 
-    # Monitoring carries a full timestamp now and then and 16-bit offsets in between.
-    # The offsets count in FIT time, whose epoch is not a multiple of 2^16 in Unix time.
+    # Monitoring carries 16-bit offsets from the last full timestamp of any message before it in the file
+    # (often a monitoring_info), counted in FIT time, whose epoch is not a multiple of 2^16 in Unix time.
     last = None
-    for m in messages.get("monitoring_mesgs", []):
-        if m.get("timestamp") is not None:
-            last = int(m["timestamp"])
-        elif m.get("timestamp_16") is not None and last is not None:
+    for num, m in messages.get("_ordered", []):
+        if isinstance(m.get("timestamp"), int):
+            last = m["timestamp"]
+        elif num == MONITORING and m.get("timestamp_16") is not None and last is not None:
             last += (int(m["timestamp_16"]) - last) & 0xFFFF
-        else:
+        if num != MONITORING or last is None or (m.get("timestamp") is None and m.get("timestamp_16") is None):
             continue
         if m.get("heart_rate"):
             add("hr", unix(last), m["heart_rate"])
@@ -114,10 +121,13 @@ def rows(messages):
         activities.append((unix(s["start_time"]), json.dumps(data)))
     return samples, assessments, activities
 
-def store(db, samples, assessments, activities):
-    db.executemany("insert or replace into samples values (?, ?, ?)", samples)
-    db.executemany("insert or replace into assess values (?, ?)", assessments)
-    db.executemany("insert or replace into activities values (?, ?)", activities)
+def store(db, src, samples, assessments, activities):
+    """A file's rows in place of what an earlier version of the same file (`src`) gave."""
+    for table in ("samples", "assess", "activities"):
+        db.execute(f"delete from {table} where src = ?", (src,))
+    db.executemany("insert or replace into samples values (?, ?, ?, ?)", [(*r, src) for r in samples])
+    db.executemany("insert or replace into assess values (?, ?, ?)", [(*r, src) for r in assessments])
+    db.executemany("insert or replace into activities values (?, ?, ?)", [(*r, src) for r in activities])
 
 def sha(path):
     h = hashlib.sha256()
@@ -144,10 +154,11 @@ def keep_copy(src, archive, rel):
         os.replace(tmp, dest)
     return digest, dest
 
-def import_files(db, paths):
-    """Decode every file not imported yet. Returns {path: message counts} of the new ones."""
+def import_files(db, items):
+    """Decode every file not imported yet; items are (path, src), src naming the file on the watch, so a newer
+    version of it (today's monitoring grows) replaces the older one. Returns {path: message counts} of the new ones."""
     new = {}
-    for path in paths:
+    for path, src in items:
         digest = sha(path)
         if db.execute("select 1 from files where sha = ?", (digest,)).fetchone():
             continue
@@ -156,8 +167,8 @@ def import_files(db, paths):
         except Exception as e:  # a half-written file of today: the next import reads it whole
             new[str(path)] = {"error": str(e)[:200]}
             continue
-        store(db, *rows(messages))
-        counts = Counter({k: len(v) for k, v in messages.items()})
+        store(db, src, *rows(messages))
+        counts = Counter({k: len(v) for k, v in messages.items() if k != "_ordered"})
         db.execute("insert into files values (?, ?, strftime('%s','now'), ?)", (digest, str(path), json.dumps(counts)))
         new[str(path)] = dict(counts)
     db.commit()

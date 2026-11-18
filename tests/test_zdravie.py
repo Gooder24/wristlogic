@@ -62,3 +62,84 @@ class FakeWatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from fit_tool.fit_file_builder import FitFileBuilder
+from fit_tool.profile.messages.monitoring_info_message import MonitoringInfoMessage
+from fit_tool.profile.messages.monitoring_message import MonitoringMessage
+from fit_tool.profile.messages.sleep_assessment_message import SleepAssessmentMessage
+from fit_tool.profile.messages.sleep_level_message import SleepLevelMessage
+from fit_tool.profile.profile_type import SleepLevel
+import fitimport, metrics, zdravie
+
+TZ = ZoneInfo("Europe/Bratislava")
+
+def at(day, hh, mm=0):
+    return datetime(2026, 11, day, hh, mm, tzinfo=TZ)
+
+def sleep_file(path, stages, assessment=None):
+    """stages: [(datetime, SleepLevel)], written as Garmin's change records."""
+    b = FitFileBuilder(auto_define=True)
+    for t, lv in stages:
+        m = SleepLevelMessage(); m.timestamp = int(t.timestamp() * 1000); m.sleep_level = lv; b.add(m)
+    if assessment:
+        a = SleepAssessmentMessage()
+        for k, v in assessment.items(): setattr(a, k, v)
+        b.add(a)
+    b.build().to_file(str(path))
+
+class Edges(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.dir = Path(self.tmp.name)
+        self.db = fitimport.connect(self.dir / "z.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, *names):
+        fitimport.import_files(self.db, [(self.dir / n, n) for n in names])
+        return metrics.sleeps(self.db)
+
+    def test_change_records_keep_their_whole_length(self):
+        sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),
+                                        (at(11, 1), SleepLevel.REM), (at(11, 2), SleepLevel.AWAKE)])
+        [s] = self.load("a.fit")
+        self.assertEqual((s["light"], s["deep"], s["rem"]), (3600, 3600, 3600))
+        self.assertEqual(s["wake"], int(at(11, 2).timestamp()))
+        self.assertTrue(s["main"])
+
+    def test_a_nap_before_the_night_stays_apart_and_a_partial_night_is_a_night(self):
+        sleep_file(self.dir / "nap.fit", [(at(10, 20, 0), SleepLevel.LIGHT), (at(10, 20, 25), SleepLevel.AWAKE)])
+        sleep_file(self.dir / "night.fit", [(at(10, 21, 30), SleepLevel.LIGHT), (at(11, 5), SleepLevel.AWAKE)])
+        sleep_file(self.dir / "part.fit", [(at(12, 22), SleepLevel.LIGHT), (at(13, 0), SleepLevel.AWAKE)])
+        nap, night, part = self.load("nap.fit", "night.fit", "part.fit")
+        self.assertEqual(nap["asleep"], 25 * 60)
+        self.assertFalse(nap["main"])
+        self.assertTrue(night["main"] and part["main"])
+
+    def test_a_newer_version_of_a_file_replaces_the_older(self):
+        sleep_file(self.dir / "v1.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 5, 20), SleepLevel.AWAKE)])
+        sleep_file(self.dir / "v2.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 4), SleepLevel.AWAKE)])
+        fitimport.import_files(self.db, [(self.dir / "v1.fit", "Sleep/S.fit")])
+        fitimport.import_files(self.db, [(self.dir / "v2.fit", "Sleep/S.fit")])
+        [s] = metrics.sleeps(self.db)
+        self.assertEqual(s["wake"], int(at(11, 4).timestamp()))
+
+    def test_partial_garmin_scores_still_publish(self):
+        sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 6), SleepLevel.AWAKE)],
+                   {"overall_sleep_score": 80, "sleep_quality_score": 70})
+        self.load("a.fit")
+        nights, days = metrics.nights(self.db), []
+        text = zdravie.ics(nights, days)
+        self.assertIn("Garmin skóre spánku 80 (kvalita 70)", text.replace("\r\n ", ""))
+
+    def test_monitoring_offsets_from_a_monitoring_info_anchor(self):
+        b = FitFileBuilder(auto_define=True)
+        t0 = int(at(10, 12).timestamp())
+        i = MonitoringInfoMessage(); i.timestamp = t0 * 1000; b.add(i)
+        for k in range(1, 4):
+            m = MonitoringMessage(); m.timestamp_16 = (t0 - fitimport.FIT_EPOCH + 60 * k) & 0xFFFF; m.heart_rate = 60 + k; b.add(m)
+        b.build().to_file(str(self.dir / "m.fit"))
+        self.load("m.fit")
+        self.assertEqual(metrics.series(self.db, "hr"), [(t0 + 60, 61.0), (t0 + 120, 62.0), (t0 + 180, 63.0)])

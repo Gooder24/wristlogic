@@ -255,11 +255,11 @@ def days(db, birth_year=None, rest=60):
             if hrr >= 0.5: load += secs / 60 * min(5, int((hrr - 0.5) * 10) + 1)
             if hrr >= 0.6: vigorous += secs
             elif hrr >= 0.4: moderate += secs
-        steps = 0
+        steps = None  # no monitoring that day: unknown, not zero
         for k in kinds:
             if k.split(":", 1)[1] in ("walking", "running"):
                 row = db.execute("select max(value) from samples where kind = ? and ts >= ? and ts < ?", (k, a, b)).fetchone()
-                steps += int(row[0] or 0)
+                if row[0] is not None: steps = (steps or 0) + int(row[0])
         worn_days += worn >= 12 * 3600  # fitness and form mean something only after four weeks on the wrist
         fitness += (load - fitness) / 42
         fatigue += (load - fatigue) / 7

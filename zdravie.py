@@ -74,7 +74,7 @@ def night_lines(n, day=None):
         if n.get("sri") is not None: lines.append(f"Pravidelnosť spánku za 7 dní (SRI) {n['sri']} zo 100")
         if n.get("ill"): lines.append("Pozor: kľudový tep aj dych sú výrazne nad tvojím priemerom (býva to pred chorobou alebo po alkohole)")
     if day:
-        lines.append(f"Včera: {day['steps']} krokov, záťaž {num(day['strain'], 1)}/21 (TRIMP {day['trimp']}), "
+        lines.append(f"Včera: {num(day['steps'])} krokov, záťaž {num(day['strain'], 1)}/21 (TRIMP {day['trimp']}), "
                      f"pohyb {day['moderate_min']} min stredne + {day['vigorous_min']} min intenzívne"
                      + (f", kondícia {day['fitness']}, forma {day['form']:+d}" if day["form"] is not None else ""))
     return lines
@@ -94,7 +94,7 @@ def report(nights, days, count=1):
         out.append(f"{DAYS[wake.weekday()]} {wake.day}. {wake.month}.  " + "\n  ".join(night_lines(n, day)))
     if days:
         d = days[-1]
-        out.append(f"Dnes {d['date']}: {d['steps']} krokov, záťaž {num(d['strain'], 1)}/21, stres {num(d['stress'])}, "
+        out.append(f"Dnes {d['date']}: {num(d['steps'])} krokov, záťaž {num(d['strain'], 1)}/21, stres {num(d['stress'])}, "
                    f"VO₂max {num(d['vo2max'])}, nosené {num(d['worn_h'], 1)} h")
     return "\n\n".join(out)
 
@@ -106,7 +106,7 @@ def table(nights, days, count):
         g = (n.get("garmin") or {}).get("overall_sleep_score")
         rows.append(f"{d['date']}  {hm(n['asleep']) if n else '–':>8} {round(n['deep'] / 60) if n else '–':>4} "
                     f"{round(n['rem'] / 60) if n else '–':>4} {num(g):>6} {num(n.get('rhr')):>4} {num(n.get('resp'), 1):>5} "
-                    f"{num(n.get('recovery')):>6} {d['steps']:>6} {num(d['strain'], 1):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}")
+                    f"{num(n.get('recovery')):>6} {num(d['steps']):>6} {num(d['strain'], 1):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}")
     return "\n".join(rows)
 
 # ------------------------------------------------------------------ calendar

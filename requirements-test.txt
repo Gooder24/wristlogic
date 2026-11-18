@@ -1,0 +1,1 @@
+fit-tool==0.9.17  # tests only: writes the fake watch

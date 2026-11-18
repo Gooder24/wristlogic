@@ -165,7 +165,7 @@ def import_watch(con):
     kept = []
     with device.mounted(DATA / "mnt") as root:
         for src, rel in device.fit_files(root):
-            kept.append((fitimport.keep_copy(src, archive, rel)[1], str(rel)))
+            kept.append((fitimport.keep_copy(src, archive, rel)[1], f"{archive.name}/{rel}"))
     return fitimport.import_files(con, kept)
 
 def main(argv):
@@ -175,9 +175,8 @@ def main(argv):
         with open(DATA / ".lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if len(argv) > 1:
-                root = Path(argv[1])
-                new = fitimport.import_files(con, sorted((p, str(p.relative_to(root))) for p in root.rglob("*")
-                                                         if p.suffix.lower() == ".fit"))
+                root = Path(argv[1]).resolve()
+                new = fitimport.import_files(con, sorted((p, str(p)) for p in root.rglob("*") if p.suffix.lower() == ".fit"))
             else:
                 new = import_watch(con)
                 if new is None:

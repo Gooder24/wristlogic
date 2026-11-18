@@ -89,7 +89,7 @@ def sleep_file(path, stages, assessment=None):
         b.add(a)
     b.build().to_file(str(path))
 
-class Edges(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.dir = Path(self.tmp.name)
         self.db = fitimport.connect(self.dir / "z.db")
@@ -101,6 +101,7 @@ class Edges(unittest.TestCase):
         fitimport.import_files(self.db, [(self.dir / n, n) for n in names])
         return metrics.sleeps(self.db)
 
+class Edges(Base):
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),
                                         (at(11, 1), SleepLevel.REM), (at(11, 2), SleepLevel.AWAKE)])
@@ -143,3 +144,34 @@ class Edges(unittest.TestCase):
         b.build().to_file(str(self.dir / "m.fit"))
         self.load("m.fit")
         self.assertEqual(metrics.series(self.db, "hr"), [(t0 + 60, 61.0), (t0 + 120, 62.0), (t0 + 180, 63.0)])
+
+class Formats(Base):
+    def dense(self, path, minutes):
+        """minutes: [(datetime, SleepLevel, count)] written one record a minute."""
+        stages = []
+        for t, lv, n in minutes:
+            stages += [(t + timedelta(minutes=k), lv) for k in range(n)]
+        sleep_file(path, stages)
+
+    def test_dense_off_wrist_gap_is_not_sleep(self):
+        self.dense(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT, 120), (at(11, 2), SleepLevel.LIGHT, 180)])
+        sleeps = self.load("a.fit")
+        self.assertEqual(sum(s["asleep"] for s in sleeps), 300 * 60)
+
+    def test_dense_nap_in_the_same_file_stays_apart(self):
+        self.dense(self.dir / "a.fit", [(at(10, 20), SleepLevel.LIGHT, 25), (at(10, 21, 30), SleepLevel.LIGHT, 420)])
+        nap, night = self.load("a.fit")
+        self.assertEqual(nap["asleep"], 25 * 60)
+        self.assertFalse(nap["main"])
+
+    def test_sparse_night_across_two_files(self):
+        sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP)])
+        sleep_file(self.dir / "b.fit", [(at(11, 1), SleepLevel.REM), (at(11, 2), SleepLevel.AWAKE)])
+        [s] = self.load("a.fit", "b.fit")
+        self.assertEqual(s["asleep"], 3 * 3600)
+
+    def test_equal_fragments_make_one_night(self):
+        sleep_file(self.dir / "a.fit", [(at(10, 22), SleepLevel.LIGHT), (at(10, 23), SleepLevel.AWAKE)])
+        sleep_file(self.dir / "b.fit", [(at(11, 1), SleepLevel.LIGHT), (at(11, 2), SleepLevel.AWAKE)])
+        a, b = self.load("a.fit", "b.fit")
+        self.assertEqual([a["main"], b["main"]].count(True), 1)

@@ -48,24 +48,30 @@ def weighted(points, end=None, cap=CAP):
 def sleeps(db):
     """Every sleep the watch staged, oldest first.
 
-    A sleep level holds until the next one: Garmin writes one a minute or only the changes. A new sleep starts
-    after half an hour with nothing once the last level was awake, or where another file begins (a nap, then the
-    night), and always after half a day."""
+    Garmin writes a sleep level either every minute (dense) or only when the stage changes (sparse); each file is
+    read the way it is written. Dense: a level stands for at most two of its steps, and half an hour with no
+    samples (off the wrist, or a nap before the night) starts a new sleep. Sparse: a level holds until the next
+    record, and a new sleep starts half an hour after an awake record, or after half a day."""
     points = db.execute("select ts, value, src from samples where kind = 'sleep' order by ts").fetchall()
+    by_src = {}
+    for ts, _, src in points: by_src.setdefault(src, []).append(ts)
+    step = {src: int(statistics.median([b - a for a, b in zip(t, t[1:])] or [60])) for src, t in by_src.items()}
+    cap = {src: (max(60, 2 * st) if st <= 120 else SPLIT) for src, st in step.items()}
     groups, cur = [], []
     for p in points:
         gap = p[0] - cur[-1][0] if cur else 0
-        if cur and (gap > 12 * 3600 or (gap > 1800 and (p[2] != cur[-1][2] or int(cur[-1][1]) in (0, AWAKE)))):
+        dense = cur and cap[cur[-1][2]] < SPLIT
+        if cur and (gap > SPLIT or (gap > 1800 and (dense or int(cur[-1][1]) == AWAKE))):
             groups.append(cur); cur = []
         cur.append(p)
     if cur: groups.append(cur)
     out = []
     for g in groups:
+        limit = max(cap[src] for _, _, src in g)
+        end = g[-1][0] + min(step[g[-1][2]], 60)
         g = [(ts, int(lv)) for ts, lv, _ in g]
-        steps = [b[0] - a[0] for a, b in zip(g, g[1:])]
-        end = g[-1][0] + min(int(statistics.median(steps)) if steps else 60, 60)
         stages = {AWAKE: 0, LIGHT: 0, DEEP: 0, REM: 0}
-        spans = weighted(g, end, cap=SPLIT)
+        spans = weighted(g, end, cap=limit)
         for ts, level, secs in spans:
             if level in stages: stages[level] += secs
         asleep = stages[LIGHT] + stages[DEEP] + stages[REM]
@@ -81,12 +87,17 @@ def sleeps(db):
         middle = local((onset + wake) // 2).hour
         out.append({"start": g[0][0], "end": end, "asleep": asleep, "awake": stages[AWAKE], "light": stages[LIGHT],
                     "deep": stages[DEEP], "rem": stages[REM], "awakenings": awakenings, "onset": onset, "wake": wake,
-                    "main": asleep >= 3 * 3600 or not 9 <= middle < 20})
+                    "cap": limit, "main": asleep >= 3 * 3600 or not 9 <= middle < 20})
     # One night per night: of short night-time sleeps around the same midnight, only the longest is the night.
     night = lambda s: local((s["onset"] + s["wake"]) // 2 - 12 * 3600).date()
+    longest = {}
+    for s in out:
+        if s["main"]:
+            key = night(s)
+            longest[key] = max(longest.get(key, s), s, key=lambda o: (o["asleep"], o["wake"]))
     for s in out:
         if s["main"] and s["asleep"] < 3 * 3600:
-            s["main"] = not any(o is not s and o["main"] and night(o) == night(s) and o["asleep"] > s["asleep"] for o in out)
+            s["main"] = longest[night(s)] is s
     return out
 
 def lowest_mean(points, window=1800, need=5):
@@ -126,7 +137,8 @@ def regularity(db, end, nights):
         for m in range(max(0, (ts - start) // 60 - 10), min(minutes, (ts - start) // 60 + 10)):
             state[m] = 0
     for s in nights:
-        for ts, lv, secs in weighted(series(db, "sleep", max(s["start"], start), min(s["end"], end)), s["end"], cap=SPLIT):
+        # The whole sleep, so a stage that began before the window still covers its first minutes.
+        for ts, lv, secs in weighted(series(db, "sleep", s["start"], s["end"]), s["end"], cap=s["cap"]):
             first = (ts - start) // 60
             for m in range(max(0, first), min(minutes, first + max(1, secs // 60))):
                 state[m] = 1 if int(lv) in (LIGHT, DEEP, REM) else 0

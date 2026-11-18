@@ -56,7 +56,7 @@ def night_lines(n, day=None):
         lines.append(f"Garmin skóre spánku {g['overall_sleep_score']}"
                      + (f" (kvalita {g['sleep_quality_score']}, zotavenie {g['sleep_recovery_score']})" if g.get("sleep_quality_score") is not None else ""))
     if n.get("need"):
-        lines.append(f"Potreba {hm(n['need'])} · splnené {n['performance']} % · spánkový dlh za {n['debt_nights']} nocí {hm(n['debt'])}")
+        lines.append(f"Potreba {hm(n['need'])} · splnené {n['performance']} % · spánkový dlh za 7 dní {hm(n['debt'])}")
     body = []
     if n["rhr"]: body.append(f"kľudový tep {round(n['rhr'])}" + (f" (bežne {round(n['base']['rhr'])})" if n.get("base", {}).get("rhr") else ""))
     if n["hrv"]: body.append(f"HRV {round(n['hrv'])} ms" + (f" (bežne {round(n['base']['hrv'])})" if n.get("base", {}).get("hrv") else ""))
@@ -67,7 +67,7 @@ def night_lines(n, day=None):
     if n.get("main"):
         rec = n.get("recovery")
         lines.append(f"Zotavenie {rec} % (odhad podľa tvojho priemeru)" if rec is not None
-                     else "Zotavenie: zatiaľ chýba aspoň 4 nocí na tvoj priemer")
+                     else "Zotavenie: ukážem od 5. noci, keď poznám tvoj priemer")
         if n.get("sri") is not None: lines.append(f"Pravidelnosť spánku za 7 dní (SRI) {n['sri']} zo 100")
         if n.get("ill"): lines.append("Pozor: kľudový tep aj dych sú výrazne nad tvojím priemerom (býva to pred chorobou alebo po alkohole)")
     if day:

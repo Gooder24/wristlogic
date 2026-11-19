@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""zdravie: sleep and health from Karchi's Garmin watch, local only.
+"""wristlogic: sleep and health from Karchi's Garmin watch, local only.
 
-    zdravie import [DIR]   copy the FIT files from the plugged-in watch (or read them from DIR) and publish
-    zdravie                last night and today
-    zdravie dni [N]        the last N days (14)
-    zdravie publish        write spanok.ics and health.json again
+    wristlogic import [DIR]   copy the FIT files from the plugged-in watch (or read them from DIR) and publish
+    wristlogic                last night and today
+    wristlogic dni [N]        the last N days (14)
+    wristlogic publish        write spanok.ics and health.json again
 
-Data: ~/.local/share/zdravie (fit/ is every file the watch ever had). Settings: ~/.config/zdravie/config.json,
+Data: ~/.local/share/wristlogic (fit/ is every file the watch ever had). Settings: ~/.config/wristlogic/config.json,
 e.g. {"need_hours": 8.5, "birth_year": 2008}. Kalendarix subscribes to http://<asus>:8791/spanok.ics.
 """
 import fcntl, json, os, statistics, subprocess, sys
@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import device, fitimport, metrics
 
-DATA = Path(os.environ.get("ZDRAVIE_DATA", Path.home() / ".local/share/zdravie"))
-CONFIG = Path(os.environ.get("ZDRAVIE_CONFIG", Path.home() / ".config/zdravie/config.json"))
+DATA = Path(os.environ.get("WRISTLOGIC_DATA", Path.home() / ".local/share/wristlogic"))
+CONFIG = Path(os.environ.get("WRISTLOGIC_CONFIG", Path.home() / ".config/wristlogic/config.json"))
 
 def config():
     try: return json.loads(CONFIG.read_text())
@@ -25,7 +25,7 @@ def config():
 
 def db():
     DATA.mkdir(parents=True, exist_ok=True)
-    return fitimport.connect(DATA / "zdravie.db")
+    return fitimport.connect(DATA / "wristlogic.db")
 
 def hm(secs):
     secs = int(round(secs / 60)) * 60
@@ -148,7 +148,7 @@ def fold(line):
 def utc(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-NAME = "zdravie"
+NAME = "wristlogic"
 
 def entries(nights, days):
     """One calendar entry per sleep: (uid, start, end, title, description)."""

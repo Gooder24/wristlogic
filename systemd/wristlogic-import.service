@@ -1,0 +1,7 @@
+[Unit]
+Description=wristlogic: copy the Garmin watch's FIT files and publish sleep
+
+[Service]
+Type=oneshot
+ExecStart=%h/wristlogic/.venv/bin/python %h/wristlogic/wristlogic.py import
+Nice=10

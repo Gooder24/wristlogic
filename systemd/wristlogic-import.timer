@@ -1,0 +1,9 @@
+[Unit]
+Description=wristlogic: look for the Garmin watch now and then (udev starts the import when it is plugged in)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

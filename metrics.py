@@ -1,4 +1,4 @@
-"""Nights and days computed from zdravie.db, with published methods only.
+"""Nights and days computed from wristlogic.db, with published methods only.
 
 Sleep stages and Garmin's sleep score come from the watch. On top of them:
 

@@ -1,7 +1,0 @@
-[Unit]
-Description=zdravie: copy the Garmin watch's FIT files and publish sleep
-
-[Service]
-Type=oneshot
-ExecStart=%h/zdravie/.venv/bin/python %h/zdravie/zdravie.py import
-Nice=10

@@ -1,4 +1,4 @@
-"""Garmin FIT files -> rows in zdravie.db.
+"""Garmin FIT files -> rows in wristlogic.db.
 
 Every file the watch had is kept under fit/ (the watch deletes sleep and monitoring files after a Garmin
 Connect sync and when its memory fills), and its messages become time series in `samples`:

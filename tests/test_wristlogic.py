@@ -12,8 +12,8 @@ class FakeWatch(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         tmp = Path(cls.tmp.name)
         subprocess.run([sys.executable, ROOT / "tests/fake_watch.py", tmp / "watch", "8", "--ill"], check=True)
-        cls.env = {**os.environ, "WEFT_CALENDAR": "", "ZDRAVIE_DATA": str(tmp / "data"), "ZDRAVIE_CONFIG": str(tmp / "none.json")}
-        cls.out = subprocess.run([sys.executable, ROOT / "zdravie.py", "import", tmp / "watch"], env=cls.env,
+        cls.env = {**os.environ, "WEFT_CALENDAR": "", "WRISTLOGIC_DATA": str(tmp / "data"), "WRISTLOGIC_CONFIG": str(tmp / "none.json")}
+        cls.out = subprocess.run([sys.executable, ROOT / "wristlogic.py", "import", tmp / "watch"], env=cls.env,
                                  capture_output=True, text=True, check=True).stdout
         cls.health = json.loads((tmp / "data/public/health.json").read_text())
         cls.ics = (tmp / "data/public/spanok.ics").read_bytes()
@@ -54,7 +54,7 @@ class FakeWatch(unittest.TestCase):
         self.assertIn("Priebeh: ", unfolded)
 
     def test_import_again_adds_nothing(self):
-        out = subprocess.run([sys.executable, ROOT / "zdravie.py", "import", Path(self.tmp.name) / "watch"], env=self.env,
+        out = subprocess.run([sys.executable, ROOT / "wristlogic.py", "import", Path(self.tmp.name) / "watch"], env=self.env,
                              capture_output=True, text=True, check=True).stdout
         self.assertTrue(out.startswith("Nových súborov 0"), out)
 
@@ -74,7 +74,7 @@ from fit_tool.profile.messages.sleep_assessment_message import SleepAssessmentMe
 from fit_tool.profile.messages.sleep_level_message import SleepLevelMessage
 from fit_tool.profile.messages.event_message import EventMessage
 from fit_tool.profile.profile_type import EventType, SleepLevel
-import fitimport, metrics, zdravie
+import fitimport, metrics, wristlogic
 
 TZ = ZoneInfo("Europe/Bratislava")
 
@@ -127,15 +127,15 @@ class Edges(Base):
 
     def test_stages_with_their_share_and_the_course_of_the_night(self):
         [n] = self.instinct_night()
-        self.assertEqual(zdravie.stage_lines(n), [
+        self.assertEqual(wristlogic.stage_lines(n), [
             "Fázy: hlboký 1 h 00 min (49 %) · ľahký 12 min (10 %) · REM 50 min (41 %) · bdenie 10 min (1× prebudený)",
             "Priebeh: 22:48 ľahký 12 min → 23:00 hlboký 1 h 00 min → 00:00 bdenie 10 min → 00:10 REM 50 min"])
 
     def test_a_dense_night_keeps_a_short_course(self):
         n = {"deep": 0, "light": 0, "rem": 0, "awake": 0, "asleep": 1, "awakenings": 0,
              "spans": [(60 * i, 2 + i % 3, 60) for i in range(300)]}
-        course = zdravie.stage_lines(n)[1].split(" → ")
-        self.assertLessEqual(len(course), zdravie.RUNS)
+        course = wristlogic.stage_lines(n)[1].split(" → ")
+        self.assertLessEqual(len(course), wristlogic.RUNS)
 
     @unittest.skipUnless((ROOT.parent / "weft/server/calendar/kalendar.py").exists(), "needs Weft's kalendar.py beside this repo")
     def test_the_calendar_lands_in_weft_and_keeps_karchis_settings(self):
@@ -143,23 +143,23 @@ class Edges(Base):
         (weft / "kalendar.py").write_bytes((ROOT.parent / "weft/server/calendar/kalendar.py").read_bytes())
         mine = {"id": "kx-1", "name": "Moje", "events": [{"uid": "a", "title": "t", "start": "2026-11-01T10:00:00.000Z", "end": "2026-11-01T11:00:00.000Z"}]}
         (weft / "data/calendars.json").write_text(json.dumps({"schema": 2, "calendars": [mine]}))
-        zdravie.WEFT = str(weft)
+        wristlogic.WEFT = str(weft)
         try:
             nights = self.instinct_night()
-            self.assertIsNone(zdravie.to_weft(nights, []))
+            self.assertIsNone(wristlogic.to_weft(nights, []))
             doc = json.loads((weft / "data/calendars.json").read_text())
             self.assertEqual(doc["calendars"][0], mine)
             cal = doc["calendars"][1]
-            self.assertEqual((cal["id"], cal["name"], len(cal["events"])), (zdravie.CAL_ID, "Spánok", 1))
+            self.assertEqual((cal["id"], cal["name"], len(cal["events"])), (wristlogic.CAL_ID, "Spánok", 1))
             self.assertIn("Fázy: hlboký 1 h 00 min", cal["events"][0]["description"])
             # Karchi hides it in Weft; the next import changes the nights and keeps it hidden.
             cal["visible"] = False
             (weft / "data/calendars.json").write_text(json.dumps(doc))
-            self.assertIsNone(zdravie.to_weft([], []))
+            self.assertIsNone(wristlogic.to_weft([], []))
             doc = json.loads((weft / "data/calendars.json").read_text())
             self.assertEqual((doc["calendars"][1]["visible"], doc["calendars"][1]["events"]), (False, []))
         finally:
-            zdravie.WEFT = ""
+            wristlogic.WEFT = ""
 
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),
@@ -191,7 +191,7 @@ class Edges(Base):
                    {"overall_sleep_score": 80, "sleep_quality_score": 70})
         self.load("a.fit")
         nights, days = metrics.nights(self.db), []
-        text = zdravie.ics(nights, days)
+        text = wristlogic.ics(nights, days)
         self.assertIn("Garmin skóre spánku 80 (kvalita 70)", text.replace("\r\n ", ""))
 
     def test_monitoring_offsets_from_a_monitoring_info_anchor(self):

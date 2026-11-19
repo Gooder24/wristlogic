@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+os.environ["WEFT_CALENDAR"] = ""  # never Karchi's live Weft calendar
 
 class FakeWatch(unittest.TestCase):
     @classmethod
@@ -11,7 +12,7 @@ class FakeWatch(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         tmp = Path(cls.tmp.name)
         subprocess.run([sys.executable, ROOT / "tests/fake_watch.py", tmp / "watch", "8", "--ill"], check=True)
-        cls.env = {**os.environ, "ZDRAVIE_DATA": str(tmp / "data"), "ZDRAVIE_CONFIG": str(tmp / "none.json")}
+        cls.env = {**os.environ, "WEFT_CALENDAR": "", "ZDRAVIE_DATA": str(tmp / "data"), "ZDRAVIE_CONFIG": str(tmp / "none.json")}
         cls.out = subprocess.run([sys.executable, ROOT / "zdravie.py", "import", tmp / "watch"], env=cls.env,
                                  capture_output=True, text=True, check=True).stdout
         cls.health = json.loads((tmp / "data/public/health.json").read_text())
@@ -49,7 +50,8 @@ class FakeWatch(unittest.TestCase):
         self.assertIn("X-WR-CALNAME:Spánok", text)
         self.assertTrue(all(len(line) <= 75 for line in self.ics.split(b"\r\n")))
         unfolded = text.replace("\r\n ", "")
-        self.assertIn("Hlboký 1 h 55 min", unfolded)
+        self.assertIn("Fázy: hlboký 1 h 55 min (27 %) · ľahký 3 h 20 min (47 %) · REM 1 h 50 min (26 %)", unfolded)
+        self.assertIn("Priebeh: ", unfolded)
 
     def test_import_again_adds_nothing(self):
         out = subprocess.run([sys.executable, ROOT / "zdravie.py", "import", Path(self.tmp.name) / "watch"], env=self.env,
@@ -115,6 +117,49 @@ class Edges(Base):
         self.assertEqual((s["light"], s["deep"], s["awake"], s["rem"]), (12 * 60, 3600, 600, 50 * 60))
         self.assertEqual((s["start"], s["end"], s["wake"]), (int(at(10, 22, 48).timestamp()), int(at(11, 1).timestamp()), int(at(11, 1).timestamp())))
         self.assertEqual(s["awakenings"], 1)
+
+    def instinct_night(self):
+        sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),
+                                        (at(11, 0, 10), SleepLevel.AWAKE), (at(11, 1), SleepLevel.REM)],
+                   window=(at(10, 22, 48), at(11, 1)))
+        self.load("a.fit")
+        return metrics.nights(self.db)
+
+    def test_stages_with_their_share_and_the_course_of_the_night(self):
+        [n] = self.instinct_night()
+        self.assertEqual(zdravie.stage_lines(n), [
+            "Fázy: hlboký 1 h 00 min (49 %) · ľahký 12 min (10 %) · REM 50 min (41 %) · bdenie 10 min (1× prebudený)",
+            "Priebeh: 22:48 ľahký 12 min → 23:00 hlboký 1 h 00 min → 00:00 bdenie 10 min → 00:10 REM 50 min"])
+
+    def test_a_dense_night_keeps_a_short_course(self):
+        n = {"deep": 0, "light": 0, "rem": 0, "awake": 0, "asleep": 1, "awakenings": 0,
+             "spans": [(60 * i, 2 + i % 3, 60) for i in range(300)]}
+        course = zdravie.stage_lines(n)[1].split(" → ")
+        self.assertLessEqual(len(course), zdravie.RUNS)
+
+    @unittest.skipUnless((ROOT.parent / "weft/server/calendar/kalendar.py").exists(), "needs Weft's kalendar.py beside this repo")
+    def test_the_calendar_lands_in_weft_and_keeps_karchis_settings(self):
+        weft = self.dir / "weft"; (weft / "data").mkdir(parents=True)
+        (weft / "kalendar.py").write_bytes((ROOT.parent / "weft/server/calendar/kalendar.py").read_bytes())
+        mine = {"id": "kx-1", "name": "Moje", "events": [{"uid": "a", "title": "t", "start": "2026-11-01T10:00:00.000Z", "end": "2026-11-01T11:00:00.000Z"}]}
+        (weft / "data/calendars.json").write_text(json.dumps({"schema": 2, "calendars": [mine]}))
+        zdravie.WEFT = str(weft)
+        try:
+            nights = self.instinct_night()
+            self.assertIsNone(zdravie.to_weft(nights, []))
+            doc = json.loads((weft / "data/calendars.json").read_text())
+            self.assertEqual(doc["calendars"][0], mine)
+            cal = doc["calendars"][1]
+            self.assertEqual((cal["id"], cal["name"], len(cal["events"])), (zdravie.CAL_ID, "Spánok", 1))
+            self.assertIn("Fázy: hlboký 1 h 00 min", cal["events"][0]["description"])
+            # Karchi hides it in Weft; the next import changes the nights and keeps it hidden.
+            cal["visible"] = False
+            (weft / "data/calendars.json").write_text(json.dumps(doc))
+            self.assertIsNone(zdravie.to_weft([], []))
+            doc = json.loads((weft / "data/calendars.json").read_text())
+            self.assertEqual((doc["calendars"][1]["visible"], doc["calendars"][1]["events"]), (False, []))
+        finally:
+            zdravie.WEFT = ""
 
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),

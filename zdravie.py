@@ -9,7 +9,7 @@
 Data: ~/.local/share/zdravie (fit/ is every file the watch ever had). Settings: ~/.config/zdravie/config.json,
 e.g. {"need_hours": 8.5, "birth_year": 2008}. Kalendarix subscribes to http://<asus>:8791/spanok.ics.
 """
-import fcntl, json, os, statistics, sys
+import fcntl, json, os, statistics, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,13 +44,35 @@ def compute(con):
 
 # ------------------------------------------------------------------ text
 
+STAGE_NAMES = {metrics.DEEP: "hlboký", metrics.LIGHT: "ľahký", metrics.REM: "REM", metrics.AWAKE: "bdenie", 0: "nemerané"}
+RUNS = 24      # at most this many stretches in the course of a night (a watch that writes a level every minute)
+SHORT = 5 * 60 # stretches shorter than this merge into the one before when there are more
+
+def stage_lines(n):
+    """The stages of one sleep: totals with their share of the time asleep, then the night stretch by stretch."""
+    share = lambda k: f" ({round(100 * n[k] / max(1, n['asleep']))} %)"
+    woke = (n.get("garmin") or {}).get("awakenings_count", n["awakenings"])
+    lines = [f"Fázy: hlboký {hm(n['deep'])}{share('deep')} · ľahký {hm(n['light'])}{share('light')} · "
+             f"REM {hm(n['rem'])}{share('rem')} · bdenie {hm(n['awake'])}" + (f" ({woke}× prebudený)" if woke else "")]
+    runs = []
+    for ts, lv, secs in n.get("spans") or []:
+        if runs and (runs[-1][1] == int(lv) or (len(n["spans"]) > RUNS and secs < SHORT)): runs[-1][2] += secs
+        else: runs.append([ts, int(lv), secs])
+    while len(runs) > RUNS:  # still too many: the shortest stretch goes into the one before it
+        i = min(range(1, len(runs)), key=lambda i: runs[i][2])
+        runs[i - 1][2] += runs.pop(i)[2]
+        if i < len(runs) and runs[i][1] == runs[i - 1][1]: runs[i - 1][2] += runs.pop(i)[2]
+    if runs:
+        lines.append("Priebeh: " + " → ".join(f"{metrics.local(ts):%H:%M} {STAGE_NAMES.get(lv, '?')} {hm(secs)}"
+                                               for ts, lv, secs in runs))
+    return lines
+
 def night_lines(n, day=None):
     t = metrics.local
-    lines = [f"Spánok {hm(n['asleep'])} z {hm(n['end'] - n['start'])} na hodinkách "
+    lines = [*stage_lines(n),
+             f"Spánok {hm(n['asleep'])} z {hm(n['end'] - n['start'])} na hodinkách "
              f"(zaspatie {t(n['onset']):%H:%M}, prebudenie {t(n['wake']):%H:%M}, "
-             f"efektivita {round(100 * n['asleep'] / max(1, n['end'] - n['start']))} %)",
-             f"Hlboký {hm(n['deep'])} · ľahký {hm(n['light'])} · REM {hm(n['rem'])} · bdenie {hm(n['awake'])}"
-             + (f" ({woke}× prebudený)" if (woke := (n.get("garmin") or {}).get("awakenings_count", n["awakenings"])) else "")]
+             f"efektivita {round(100 * n['asleep'] / max(1, n['end'] - n['start']))} %)"]
     g = n.get("garmin") or {}
     if g.get("overall_sleep_score") is not None:
         sub = [f"{name} {g[k]}" for k, name in (("sleep_quality_score", "kvalita"), ("sleep_recovery_score", "zotavenie"))
@@ -126,11 +148,11 @@ def fold(line):
 def utc(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-def ics(nights, days):
+NAME = "zdravie"
+
+def entries(nights, days):
+    """One calendar entry per sleep: (uid, start, end, title, description)."""
     by_day = {d["date"]: d for d in days}
-    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Karchi//zdravie//SK", "CALSCALE:GREGORIAN",
-             "X-WR-CALNAME:Spánok", "X-WR-TIMEZONE:Europe/Bratislava"]
-    stamp = utc(int(datetime.now().timestamp()))
     for n in nights:
         wake = metrics.local(n["wake"]).date()
         day = by_day.get(datetime.fromordinal(wake.toordinal() - 1).date().isoformat()) if n["main"] else None
@@ -138,11 +160,44 @@ def ics(nights, days):
         title = ("Spánok " if n["main"] else "Šlofík ") + hm(n["asleep"]).replace(" min", "")
         if score is not None: title += f" · {score}"
         elif n.get("recovery") is not None: title += f" · zotavenie {n['recovery']} %"
-        lines += ["BEGIN:VEVENT", f"UID:spanok-{n['start']}@zdravie", f"DTSTAMP:{stamp}",
-                  f"DTSTART:{utc(n['start'])}", f"DTEND:{utc(n['end'])}", fold(f"SUMMARY:{esc(title)}"),
-                  fold(f"DESCRIPTION:{esc(chr(10).join(night_lines(n, day)))}"), "TRANSP:TRANSPARENT", "END:VEVENT"]
+        yield f"spanok-{n['start']}@{NAME}", n["start"], n["end"], title, "\n".join(night_lines(n, day))
+
+def ics(nights, days):
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:-//Karchi//{NAME}//SK", "CALSCALE:GREGORIAN",
+             "X-WR-CALNAME:Spánok", "X-WR-TIMEZONE:Europe/Bratislava"]
+    stamp = utc(int(datetime.now().timestamp()))
+    for uid, start, end, title, text in entries(nights, days):
+        lines += ["BEGIN:VEVENT", f"UID:{uid}", f"DTSTAMP:{stamp}", f"DTSTART:{utc(start)}", f"DTEND:{utc(end)}",
+                  fold(f"SUMMARY:{esc(title)}"), fold(f"DESCRIPTION:{esc(text)}"), "TRANSP:TRANSPARENT", "END:VEVENT"]
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
+
+# Weft's calendar on asus (github.com/Gooder24/weft server/calendar/kalendar.py), which Kalendarix syncs too.
+# Empty WEFT_CALENDAR: leave it alone (the tests).
+WEFT = os.environ.get("WEFT_CALENDAR", str(Path.home() / "matrix-spike/calendar"))
+CAL_ID = f"{NAME}-spanok"  # with uids ending in @NAME, Weft keeps the calendar read-only: this program owns it
+COLOR = "#6f7bd8"
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+def to_weft(nights, days):
+    """Puts the calendar Spánok into Weft's calendar through its three-way merge, so Karchi's own changes
+    (its colour, hiding it) and other writers' edits made meanwhile stay. Returns a reason when it did not."""
+    if not WEFT: return "off"
+    try: master = json.loads((Path(WEFT) / "data/calendars.json").read_text())
+    except FileNotFoundError: return "no Weft calendar"
+    cals = master.get("calendars") or []
+    old = next((c for c in cals if c.get("id") == CAL_ID), None)
+    events = [{"uid": uid, "title": title, "description": text, "notes": text, "location": "", "start": iso(start),
+               "end": iso(end), "allDay": False, "rrule": None, "exdates": [], "alarmMinutes": ""}
+              for uid, start, end, title, text in entries(nights, days)]
+    if old and old.get("events") == events: return None
+    cal = {**(old or {"id": CAL_ID, "name": "Spánok", "color": COLOR, "customColor": COLOR, "visible": True}), "events": events}
+    local = {**master, "calendars": [cal if c is old else c for c in cals] + ([] if old else [cal])}
+    p = subprocess.run(["python3", "-I", str(Path(WEFT) / "kalendar.py"), "merge"], capture_output=True, text=True,
+                       input=json.dumps({"base": master, "local": local}, ensure_ascii=False), timeout=120)
+    return f"Weft calendar: {(p.stderr or p.stdout).strip()[-300:]}" if p.returncode else None
 
 def write(path, text):
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -156,6 +211,7 @@ def publish(con):
     write(public / "spanok.ics", ics(nights, days))
     plain = [{k: v for k, v in n.items() if k != "spans"} for n in nights]
     write(public / "health.json", json.dumps({"nights": plain, "days": days}, ensure_ascii=False))
+    if (why := to_weft(nights, days)) and why != "off": print(why, file=sys.stderr)
     return nights, days
 
 # ------------------------------------------------------------------ import

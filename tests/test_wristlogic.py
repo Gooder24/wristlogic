@@ -137,6 +137,15 @@ class Edges(Base):
         course = wristlogic.stage_lines(n)[1].split(" → ")
         self.assertLessEqual(len(course), wristlogic.RUNS)
 
+    def test_a_dense_night_keeps_a_five_minute_waking(self):
+        # One record a minute: 60 stretches of 2 minutes would be too many, and 5 minutes awake in the middle stay.
+        spans = [(60 * i, 2 + (i // 2) % 2, 60) for i in range(120)] + [(7200 + 60 * i, 1, 60) for i in range(5)] \
+                + [(7500 + 60 * i, 4, 60) for i in range(30)]
+        n = {"deep": 0, "light": 0, "rem": 0, "awake": 0, "asleep": 1, "awakenings": 0, "spans": spans}
+        course = wristlogic.stage_lines(n)[1]
+        self.assertIn("bdenie 5 min", course)
+        self.assertTrue(course.endswith("REM 30 min"), course)
+
     @unittest.skipUnless((ROOT.parent / "weft/server/calendar/kalendar.py").exists(), "needs Weft's kalendar.py beside this repo")
     def test_the_calendar_lands_in_weft_and_keeps_karchis_settings(self):
         weft = self.dir / "weft"; (weft / "data").mkdir(parents=True)

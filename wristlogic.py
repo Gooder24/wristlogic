@@ -45,7 +45,7 @@ def compute(con):
 # ------------------------------------------------------------------ text
 
 STAGE_NAMES = {metrics.DEEP: "hlboký", metrics.LIGHT: "ľahký", metrics.REM: "REM", metrics.AWAKE: "bdenie", 0: "nemerané"}
-RUNS = 24      # at most this many stretches in the course of a night (a watch that writes a level every minute)
+RUNS = 40      # at most this many stretches in the course of a night (a watch that writes a level every minute)
 SHORT = 5 * 60 # stretches shorter than this merge into the one before when there are more
 
 def stage_lines(n):
@@ -56,8 +56,15 @@ def stage_lines(n):
              f"REM {hm(n['rem'])}{share('rem')} · bdenie {hm(n['awake'])}" + (f" ({woke}× prebudený)" if woke else "")]
     runs = []
     for ts, lv, secs in n.get("spans") or []:
-        if runs and (runs[-1][1] == int(lv) or (len(n["spans"]) > RUNS and secs < SHORT)): runs[-1][2] += secs
+        if runs and runs[-1][1] == int(lv): runs[-1][2] += secs
         else: runs.append([ts, int(lv), secs])
+    if len(runs) > RUNS:  # whole stretches shorter than SHORT go into the one before, then equal neighbours join
+        kept = runs[:1]
+        for r in runs[1:]:
+            if r[2] < SHORT: kept[-1][2] += r[2]
+            elif kept[-1][1] == r[1]: kept[-1][2] += r[2]
+            else: kept.append(r)
+        runs = kept
     while len(runs) > RUNS:  # still too many: the shortest stretch goes into the one before it
         i = min(range(1, len(runs)), key=lambda i: runs[i][2])
         runs[i - 1][2] += runs.pop(i)[2]

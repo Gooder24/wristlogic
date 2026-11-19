@@ -69,7 +69,8 @@ def stage_lines(n):
 
 def night_lines(n, day=None):
     t = metrics.local
-    lines = [*stage_lines(n),
+    stages, *course = stage_lines(n)
+    lines = [stages,
              f"Spánok {hm(n['asleep'])} z {hm(n['end'] - n['start'])} na hodinkách "
              f"(zaspatie {t(n['onset']):%H:%M}, prebudenie {t(n['wake']):%H:%M}, "
              f"efektivita {round(100 * n['asleep'] / max(1, n['end'] - n['start']))} %)"]
@@ -99,7 +100,7 @@ def night_lines(n, day=None):
         lines.append(f"Včera: {num(day['steps'])} krokov, záťaž {num(day['strain'], 1)}/21 (TRIMP {day['trimp']}), "
                      f"pohyb {day['moderate_min']} min stredne + {day['vigorous_min']} min intenzívne"
                      + (f", kondícia {day['fitness']}, forma {day['form']:+d}" if day["form"] is not None else ""))
-    return lines
+    return lines + course  # the course is long: last, under the numbers
 
 DAYS = ["Po", "Ut", "St", "Št", "Pi", "So", "Ne"]
 

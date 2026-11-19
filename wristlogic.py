@@ -4,17 +4,19 @@
     wristlogic import [DIR]   copy the FIT files from the plugged-in watch (or read them from DIR) and publish
     wristlogic                last night and today
     wristlogic dni [N]        the last N days (14)
+    wristlogic odomkni        the watch, its signals, and which metrics are open, which locked and why
     wristlogic publish        write spanok.ics and health.json again
 
 Data: ~/.local/share/wristlogic (fit/ is every file the watch ever had). Settings: ~/.config/wristlogic/config.json,
-e.g. {"need_hours": 8.5, "birth_year": 2008}. Kalendarix subscribes to http://<asus>:8791/spanok.ics.
+e.g. {"need_hours": 8.5, "birth_year": 2008, "experimental": true} (experimental: also recovery 0-100 and strain
+0-21, our own estimates). Kalendarix subscribes to http://<asus>:8791/spanok.ics.
 """
 import fcntl, json, os, statistics, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import device, fitimport, metrics
+import device, fitimport, metrics, register
 
 DATA = Path(os.environ.get("WRISTLOGIC_DATA", Path.home() / ".local/share/wristlogic"))
 CONFIG = Path(os.environ.get("WRISTLOGIC_CONFIG", Path.home() / ".config/wristlogic/config.json"))
@@ -24,8 +26,17 @@ def config():
     except FileNotFoundError: return {}
 
 def db():
+    """The database; one of an older schema is rebuilt from the archive of FIT files (the old file stays beside it)."""
     DATA.mkdir(parents=True, exist_ok=True)
-    return fitimport.connect(DATA / "wristlogic.db")
+    with open(DATA / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        con, old = fitimport.connect(DATA / "wristlogic.db")
+        if old:
+            fitimport.import_files(con, fitimport.archived(DATA / "fit"))
+            print(f"Databáza má novú podobu: prečítal som znova archív {DATA / 'fit'} (stará je {old.name}).", file=sys.stderr)
+    return con
+
+EXPERIMENTAL = False  # config "experimental": recovery 0-100 and strain 0-21, our own estimates (register.py)
 
 def hm(secs):
     secs = int(round(secs / 60)) * 60
@@ -36,7 +47,9 @@ def num(v, digits=0):
     return "–" if v is None else f"{v:.{digits}f}".replace(".", ",")
 
 def compute(con):
+    global EXPERIMENTAL
     cfg = config()
+    EXPERIMENTAL = bool(cfg.get("experimental"))
     nights = metrics.nights(con, cfg.get("need_hours", 8.0))
     rests = [n["rhr"] for n in nights if n["main"] and n["rhr"]][-30:]
     days = metrics.days(con, cfg.get("birth_year"), statistics.median(rests) if rests else 60)
@@ -87,7 +100,8 @@ def night_lines(n, day=None):
                if g.get(k) is not None]
         lines.append(f"Garmin skóre spánku {g['overall_sleep_score']}" + (f" ({', '.join(sub)})" if sub else ""))
     if n.get("need"):
-        lines.append(f"Potreba {hm(n['need'])} · splnené {n['performance']} % · spánkový dlh za 7 dní {hm(n['debt'])}")
+        lines.append(f"Potreba {hm(n['need'])} · splnené {n['performance']} %"
+                     + (f" · spánkový dlh za 7 dní {hm(n['debt'])}" if n.get("debt_nights", 0) >= 4 else ""))
     body = []
     if n["rhr"]: body.append(f"kľudový tep {round(n['rhr'])}" + (f" (bežne {round(n['base']['rhr'])})" if n.get("base", {}).get("rhr") else ""))
     if n["hrv"]: body.append(f"HRV {round(n['hrv'])} ms" + (f" (bežne {round(n['base']['hrv'])})" if n.get("base", {}).get("hrv") else ""))
@@ -99,12 +113,15 @@ def night_lines(n, day=None):
         lines.append(text[0].upper() + text[1:])
     if n.get("main"):
         rec = n.get("recovery")
-        lines.append(f"Zotavenie {rec} % (odhad podľa tvojho priemeru)" if rec is not None
-                     else "Zotavenie: ukážem od 5. noci, keď poznám tvoj priemer")
+        if not any((n.get("base") or {}).get(k) for k in ("rhr", "hrv", "resp")):
+            lines.append("Porovnanie s tvojím bežným: od 5. noci")
+        elif EXPERIMENTAL and rec is not None:
+            lines.append(f"Zotavenie {rec} % (experimentálne: naše váhy zložiek)")
         if n.get("sri") is not None: lines.append(f"Pravidelnosť spánku za 7 dní (SRI) {n['sri']} zo 100")
         if n.get("ill"): lines.append("Pozor: kľudový tep aj dych sú výrazne nad tvojím priemerom (býva to pred chorobou alebo po alkohole)")
     if day:
-        lines.append(f"Včera: {num(day['steps'])} krokov, záťaž {num(day['strain'], 1)}/21 (TRIMP {day['trimp']}), "
+        lines.append(f"Včera: {num(day['steps'])} krokov, TRIMP {day['trimp']}"
+                     + (f" (záťaž {num(day['strain'], 1)}/21, experimentálne)" if EXPERIMENTAL else "") + ", "
                      f"pohyb {day['moderate_min']} min stredne + {day['vigorous_min']} min intenzívne"
                      + (f", kondícia {day['fitness']}, forma {day['form']:+d}" if day["form"] is not None else ""))
     return lines + course  # the course is long: last, under the numbers
@@ -124,20 +141,67 @@ def report(nights, days, count=1):
         out.append(f"{DAYS[wake.weekday()]} {wake.day}. {wake.month}.  " + "\n  ".join(night_lines(n, day)))
     if days:
         d = days[-1]
-        out.append(f"Dnes {d['date']}: {num(d['steps'])} krokov, záťaž {num(d['strain'], 1)}/21, stres {num(d['stress'])}, "
+        out.append(f"Dnes {d['date']}: {num(d['steps'])} krokov, TRIMP {d['trimp']}, stres {num(d['stress'])}, "
                    f"VO₂max {num(d['vo2max'])}, nosené {num(d['worn_h'], 1)} h")
     return "\n\n".join(out)
 
 def table(nights, days, count):
     by_wake = {metrics.local(n["wake"]).date().isoformat(): n for n in nights if n["main"]}
-    rows = ["deň          spánok   hlb  REM  skóre  tep  dych  zotav  kroky  záťaž  forma"]
+    rows = ["deň          spánok   hlb  REM  skóre  tep  dych   hrv  kroky  trimp  forma" + ("  zotav  záťaž" if EXPERIMENTAL else "")]
     for d in days[-count:]:
         n = by_wake.get(d["date"]) or {}
         g = (n.get("garmin") or {}).get("overall_sleep_score")
         rows.append(f"{d['date']}  {hm(n['asleep']) if n else '–':>8} {round(n['deep'] / 60) if n else '–':>4} "
                     f"{round(n['rem'] / 60) if n else '–':>4} {num(g):>6} {num(n.get('rhr')):>4} {num(n.get('resp'), 1):>5} "
-                    f"{num(n.get('recovery')):>6} {num(d['steps']):>6} {num(d['strain'], 1):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}")
+                    f"{num(n.get('hrv')):>5} {num(d['steps']):>6} {num(d['trimp']):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}"
+                    + (f" {num(n.get('recovery')):>6} {num(d['strain'], 1):>6}" if EXPERIMENTAL else ""))
     return "\n".join(rows)
+
+# ------------------------------------------------------------------ unlock
+
+def sample_counts(con):
+    return dict(con.execute("select kind, count(*) from samples group by kind"))
+
+def devices(con):
+    return [dict(zip(("serial", "manufacturer", "model", "software", "first_seen", "last_seen"), r))
+            for r in con.execute("select serial, manufacturer, model, software, first_seen, last_seen from devices "
+                                 "where serial != 'unknown' order by last_seen desc")]
+
+SIGNALS = [("hr", "tep"), ("stress", "stres"), ("resp", "dych"), ("hrv5", "HRV po 5 min"), ("spo2", "SpO₂"),
+           ("cycles:walking", "kroky"), ("battery", "batéria")]
+
+def every(secs):
+    return f"{secs // 60} min" + (f" {secs % 60} s" if secs % 60 else "") if secs >= 60 else f"{secs} s"
+
+def unlock(con, nights, days):
+    """The watch, how dense each of its signals is over the last 7 days, and each metric: open, locked and why."""
+    out = []
+    for d in devices(con):
+        model = (d["model"] or "?").replace("_", " ").title()
+        since = metrics.local(d["first_seen"]).date() if d["first_seen"] else None
+        out.append(f"{model} · sériové č. {d['serial']}" + (f" · softvér {num(d['software'], 2)}" if d["software"] else "")
+                   + (f" · súbory od {since.day}. {since.month}. {since.year}" if since else ""))
+        week = (datetime.now(metrics.TZ).date().toordinal() - 7)
+        first = datetime.fromordinal(week).date().isoformat()
+        out.append("Signály za posledných 7 dní:")
+        for kind, name in SIGNALS:
+            rows = con.execute("select n, period, covered from coverage where device = ? and kind = ? and day > ?",
+                               (d["serial"], kind, first)).fetchall()
+            if not rows:
+                out.append(f"  {name:<14} nič" + (" (pulzný oxymeter je vypnutý)" if kind == "spo2" else "")); continue
+            period = sorted(r[1] for r in rows)[len(rows) // 2]
+            covered = round(100 * sum(r[2] for r in rows) / 7)
+            out.append(f"  {name:<14} {sum(r[0] for r in rows)} vzoriek, zvyčajne každých {every(period)}, pokrytie {covered} % času")
+        out.append("")
+    gates = register.status(nights, days, sample_counts(con))
+    shown = [(m, g) for m, g in gates if m.trust != "C"]
+    for title, part in (("Odomknuté", [x for x in shown if x[1].open]), ("Zamknuté", [x for x in shown if not x[1].open])):
+        out.append(f"{title} ({len(part)}):")
+        for m, g in part:
+            out.append(f"  {'✔' if g.open else '✗'} {m.name} · {m.trust} · {m.method}" + ("" if g.open else f"\n      {g.why}"))
+    out.append("Experimentálne (C, naše odhady): " + ", ".join(m.name for m, _ in gates if m.trust == "C")
+               + (" · zapnuté" if EXPERIMENTAL else " · zapneš ich \"experimental\": true v ~/.config/wristlogic/config.json"))
+    return "\n".join(out)
 
 # ------------------------------------------------------------------ calendar
 
@@ -167,7 +231,7 @@ def entries(nights, days):
         score = (n.get("garmin") or {}).get("overall_sleep_score")
         title = ("Spánok " if n["main"] else "Šlofík ") + hm(n["asleep"]).replace(" min", "")
         if score is not None: title += f" · {score}"
-        elif n.get("recovery") is not None: title += f" · zotavenie {n['recovery']} %"
+        elif EXPERIMENTAL and n.get("recovery") is not None: title += f" · zotavenie {n['recovery']} %"
         yield f"spanok-{n['start']}@{NAME}", n["start"], n["end"], title, "\n".join(night_lines(n, day))
 
 def ics(nights, days):
@@ -224,7 +288,10 @@ def publish(con):
     public.mkdir(parents=True, exist_ok=True)
     write(public / "spanok.ics", ics(nights, days))
     plain = [{k: v for k, v in n.items() if k != "spans"} for n in nights]
-    write(public / "health.json", json.dumps({"nights": plain, "days": days}, ensure_ascii=False))
+    gates = [{"id": m.id, "name": m.name, "method": m.method, "trust": m.trust, "open": g.open, "why": g.why,
+              "have": g.have, "need": g.need} for m, g in register.status(nights, days, sample_counts(con))]
+    write(public / "health.json", json.dumps({"devices": devices(con), "metrics": gates, "nights": plain, "days": days},
+                                             ensure_ascii=False))
     if (why := to_weft(nights, days)) and why != "off": print(why, file=sys.stderr)
     return nights, days
 
@@ -269,6 +336,8 @@ def main(argv):
     if cmd == "publish":
         publish(con); return 0
     nights, days = compute(con)
+    if cmd == "odomkni":
+        print(unlock(con, nights, days)); return 0
     if cmd == "dni":
         print(table(nights, days, int(argv[1]) if len(argv) > 1 else 14)); return 0
     if cmd in ("dnes", "noc"):

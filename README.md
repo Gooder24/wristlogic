@@ -11,17 +11,23 @@ served as `http://100.110.180.15:8791/spanok.ics`. Each night lists its stages (
 with their share of the time asleep and the course of the night.
 
 Each event carries Garmin's own staging and sleep score, and what `metrics.py` computes from the raw data
-with published methods: resting heart rate, sleep need and debt, Sleep Regularity Index, a recovery estimate
-against the personal baseline, an illness flag, daily strain (TRIMP) and the fitness-fatigue model. The
-docstring of `metrics.py` names each method.
+with published methods: resting heart rate, sleep need and debt, Sleep Regularity Index, tonight's resting heart
+rate, HRV and breathing against the personal baseline, a deviation flag, daily TRIMP and the fitness-fatigue
+model. `register.py` lists every metric with its method, how far to trust it (A, B, C, the watch's own) and
+what it needs before it shows; our own estimates (recovery 0–100, strain 0–21) show only with
+`"experimental": true`.
+
+Samples are stored per device (the serial number in each FIT file), with how dense each signal is per day.
 
     wristlogic              last night and today
     wristlogic dni 14       a table of the last days
+    wristlogic odomkni      the watch, its signals, and which metrics are open, which locked and why
     wristlogic import [DIR] from the watch, or from a folder of FIT files (e.g. a Garmin export)
 
 Setup on asus: `sudo ./install.sh root` once (jmtpfs, mtools, udev rule), then `./install.sh`. Settings in
 `~/.config/wristlogic/config.json`: `need_hours` (8), `birth_year` (for maximum heart rate; otherwise the
-highest one seen, at least 195).
+highest one seen, at least 195), `experimental` (false). A database of an older shape is read again from the
+archive on first use; the old file stays beside it as `wristlogic.v1.db`.
 
 Tests: `.venv/bin/pip install -r requirements-test.txt && .venv/bin/python -m unittest discover tests`
 (a fake watch written by `tests/fake_watch.py`).

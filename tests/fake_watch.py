@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from fit_tool.fit_file_builder import FitFileBuilder
 from fit_tool.profile.messages.file_id_message import FileIdMessage
+from fit_tool.profile.messages.hrv_value_message import HrvValueMessage
 from fit_tool.profile.messages.monitoring_message import MonitoringMessage
 from fit_tool.profile.messages.respiration_rate_message import RespirationRateMessage
 from fit_tool.profile.messages.sleep_assessment_message import SleepAssessmentMessage
@@ -39,6 +40,9 @@ def night(day, ill):
     for i, lv in enumerate(plan):
         m = SleepLevelMessage(); m.timestamp = int((start + timedelta(minutes=i)).timestamp() * 1000); m.sleep_level = lv
         b.add(m)
+    for i in range(12, len(plan) - 6, 5):  # HRV of each 5 minutes asleep
+        h = HrvValueMessage(); h.timestamp = int((start + timedelta(minutes=i)).timestamp() * 1000); h.value = 60 + rnd.randint(-15, 15)
+        b.add(h)
     a = SleepAssessmentMessage(); a.overall_sleep_score = 70 + rnd.randint(0, 20); a.sleep_quality_score = 75; a.sleep_recovery_score = 60
     b.add(a)
     end = start + timedelta(minutes=len(plan))

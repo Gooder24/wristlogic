@@ -8,10 +8,11 @@ Sleep stages and Garmin's sleep score come from the watch. On top of them:
   same state (asleep or awake) 24 hours apart, scaled to -100..100
 - recovery 0-100: tonight against the personal 30-night baseline (z-scores of overnight HRV, or of Garmin's
   HRV-based stress when the watch has no HRV, of resting heart rate, respiration and sleep performance), in
-  the spirit of Whoop's recovery; an estimate, not Whoop's proprietary formula
+  the spirit of Whoop's recovery; an estimate, not Whoop's proprietary formula: its weights are ours, so it is
+  shown only with "experimental": true (its parts, each against the baseline, are shown always)
 - daily load: Edwards' TRIMP (minutes in five zones weighted 1-5), with the zones taken from heart rate
   reserve (50-60-70-80-90 %, Karvonen) because it runs over the whole day and not one workout; strain on a
-  0-21 scale as a log of it; Banister's fitness-fatigue model: fitness (42-day mean), fatigue (7-day), form =
+  0-21 scale as a log of it (our scale: experimental, like recovery); Banister's fitness-fatigue model: fitness (42-day mean), fatigue (7-day), form =
   the difference, shown once the watch was worn at least 12 hours on 28 days
 - an illness flag when resting heart rate and respiration both rise well above baseline (Mishra et al. 2020,
   Nature Biomedical Engineering; Whoop and Oura use the same signals)

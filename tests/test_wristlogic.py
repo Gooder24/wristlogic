@@ -1,5 +1,5 @@
 """python -m unittest discover tests  (from the repo, with the venv's python)"""
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, sqlite3, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +58,45 @@ class FakeWatch(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout
         self.assertTrue(out.startswith("Nových súborov 0"), out)
 
+    def cli(self, *args, config=None):
+        env = dict(self.env)
+        if config is not None:
+            path = Path(self.tmp.name) / "config.json"; path.write_text(json.dumps(config)); env["WRISTLOGIC_CONFIG"] = str(path)
+        return subprocess.run([sys.executable, ROOT / "wristlogic.py", *args], env=env, capture_output=True, text=True, check=True).stdout
+
+    def test_each_sample_belongs_to_the_watch_that_wrote_it(self):
+        self.assertEqual([(d["serial"], d["model"]) for d in self.health["devices"]], [("3400000000", "instinct_2")])
+        con = sqlite3.connect(Path(self.tmp.name) / "data/wristlogic.db")
+        self.assertEqual(con.execute("select distinct device from samples").fetchall(), [("3400000000",)])
+        self.assertGreater(con.execute("select count(*) from samples where kind = 'hrv5'").fetchone()[0], 8 * 70)
+        # Heart rate every 2 minutes: so says its density, per day.
+        periods = {p for (p,) in con.execute("select period from coverage where kind = 'hr'")}
+        self.assertEqual(periods, {120})
+
+    def test_unlock_says_what_is_locked_why_and_how_long(self):
+        out = self.cli("odomkni")
+        opened, locked = out.split("Zamknuté")
+        self.assertIn("✔ Zložky zotavenia proti tvojmu bežnému", opened)
+        self.assertIn("Kondícia, únava, forma", locked)
+        self.assertIn("8 z 28 dní s 12 h na ruke: ešte 20", locked)
+        self.assertIn("pulzný oxymeter je vypnutý", locked)
+        self.assertRegex(out, r"HRV po 5 min +\d+ vzoriek, zvyčajne každých 5 min")
+        self.assertNotIn("✔ Zotavenie 0–100", out)
+        self.assertIn("Experimentálne (C, naše odhady): Zotavenie 0–100, Záťaž 0–21", out)
+
+    def test_recovery_and_strain_only_when_experimental(self):
+        plain = self.ics.decode().replace("\r\n ", "")
+        self.assertNotIn("Zotavenie ", plain)
+        self.assertNotIn("/21", plain)
+        self.assertIn("TRIMP", plain)
+        self.cli("publish", config={"experimental": True})
+        try:
+            text = (Path(self.tmp.name) / "data/public/spanok.ics").read_bytes().decode().replace("\r\n ", "")
+            self.assertIn("(experimentálne: naše váhy zložiek)", text)
+            self.assertIn("/21\\, experimentálne", text)
+        finally:
+            self.cli("publish")
+
     def test_steps_per_day(self):
         days = {d["date"]: d for d in self.health["days"]}
         self.assertTrue(all(d["steps"] > 10000 for d in list(days.values())[1:-1]))
@@ -73,6 +112,9 @@ from fit_tool.profile.messages.monitoring_message import MonitoringMessage
 from fit_tool.profile.messages.sleep_assessment_message import SleepAssessmentMessage
 from fit_tool.profile.messages.sleep_level_message import SleepLevelMessage
 from fit_tool.profile.messages.event_message import EventMessage
+from fit_tool.profile.messages.battery_message import BatteryMessage
+from fit_tool.profile.messages.file_id_message import FileIdMessage
+from fit_tool.profile.messages.hrv_value_message import HrvValueMessage
 from fit_tool.profile.profile_type import EventType, SleepLevel
 import fitimport, metrics, wristlogic
 
@@ -98,7 +140,7 @@ def sleep_file(path, stages, assessment=None, window=None):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.dir = Path(self.tmp.name)
-        self.db = fitimport.connect(self.dir / "z.db")
+        self.db, _ = fitimport.connect(self.dir / "z.db")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -176,6 +218,37 @@ class Edges(Base):
             self.assertEqual(after["calendars"][1]["visible"], False)
         finally:
             wristlogic.WEFT = ""
+
+    def test_hrv_of_each_five_minutes_and_battery_under_their_watch(self):
+        b = FitFileBuilder(auto_define=True)
+        f = FileIdMessage(); f.serial_number = 3424819929; f.manufacturer = 1; f.product = 3888; f.time_created = int(at(11, 6).timestamp() * 1000); b.add(f)
+        h = HrvValueMessage(); h.timestamp = int(at(11, 2).timestamp() * 1000); h.value = 69.0; b.add(h)
+        c = BatteryMessage(); c.timestamp = int(at(11, 6).timestamp() * 1000); c.capacity = 93; b.add(c)
+        b.build().to_file(str(self.dir / "h.fit"))
+        self.load("h.fit")
+        rows = self.db.execute("select device, kind, value from samples order by kind").fetchall()
+        self.assertEqual(rows, [("3424819929", "battery", 93.0), ("3424819929", "hrv5", 69.0)])
+        self.assertEqual(self.db.execute("select serial, model, first_seen from devices").fetchall(),
+                         [("3424819929", "instinct_2", int(at(11, 6).timestamp()))])
+
+    def test_an_old_database_is_rebuilt_from_the_archive(self):
+        data = self.dir / "data"; sleep = data / "fit/garmin/Sleep"; sleep.mkdir(parents=True)
+        sleep_file(sleep / "S.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 5, 20), SleepLevel.AWAKE)])
+        sleep_file(sleep / "S.0123abcd.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 4), SleepLevel.AWAKE)])
+        os.utime(sleep / "S.fit", (1, 1))  # the newer version of the file came later
+        old = sqlite3.connect(data / "wristlogic.db")
+        old.execute("create table samples (kind text, ts integer, value real, src text, primary key (kind, ts))"); old.commit(); old.close()
+        before = wristlogic.DATA
+        wristlogic.DATA = data
+        try:
+            con = wristlogic.db()
+        finally:
+            wristlogic.DATA = before
+        self.assertTrue((data / "wristlogic.v1.db").exists())
+        [s] = metrics.sleeps(con)
+        self.assertEqual(s["wake"], int(at(11, 4).timestamp()))
+        self.assertEqual(con.execute("select distinct src from samples").fetchall(), [("garmin/Sleep/S.fit",)])
+        self.assertEqual(fitimport.connect(data / "wristlogic.db")[1], None)  # once rebuilt, it stays
 
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),

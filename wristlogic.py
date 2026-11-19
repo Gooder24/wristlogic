@@ -181,22 +181,28 @@ COLOR = "#6f7bd8"
 def iso(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-def to_weft(nights, days):
+# Kalendarix's earlier subscription to the feed: this calendar replaces it, so it is taken out of Weft's calendar
+# (the merge then takes it out of Kalendarix on x270 as well) and the nights do not show twice.
+FEED = "http://100.110.180.15:8791/spanok.ics"
+
+def to_weft(nights=None, days=()):
     """Puts the calendar Spánok into Weft's calendar through its three-way merge, so Karchi's own changes
-    (its colour, hiding it) and other writers' edits made meanwhile stay. Returns a reason when it did not."""
+    (its colour, hiding it) and other writers' edits made meanwhile stay. Without nights it only takes the old
+    subscription out. Returns a reason when it did not write."""
     if not WEFT: return "off"
     try: master = json.loads((Path(WEFT) / "data/calendars.json").read_text())
     except FileNotFoundError: return "no Weft calendar"
-    cals = master.get("calendars") or []
-    old = next((c for c in cals if c.get("id") == CAL_ID), None)
-    events = [{"uid": uid, "title": title, "description": text, "notes": text, "location": "", "start": iso(start),
-               "end": iso(end), "allDay": False, "rrule": None, "exdates": [], "alarmMinutes": ""}
-              for uid, start, end, title, text in entries(nights, days)]
-    if old and old.get("events") == events: return None
-    cal = {**(old or {"id": CAL_ID, "name": "Spánok", "color": COLOR, "customColor": COLOR, "visible": True}), "events": events}
-    local = {**master, "calendars": [cal if c is old else c for c in cals] + ([] if old else [cal])}
+    cals = [c for c in master.get("calendars") or [] if c.get("sourceUrl") != FEED]
+    if nights is not None:
+        old = next((c for c in cals if c.get("id") == CAL_ID), None)
+        events = [{"uid": uid, "title": title, "description": text, "notes": text, "location": "", "start": iso(start),
+                   "end": iso(end), "allDay": False, "rrule": None, "exdates": [], "alarmMinutes": ""}
+                  for uid, start, end, title, text in entries(nights, days)]
+        cal = {**(old or {"id": CAL_ID, "name": "Spánok", "color": COLOR, "customColor": COLOR, "visible": True}), "events": events}
+        cals = [cal if c is old else c for c in cals] + ([] if old else [cal])
+    if cals == master.get("calendars"): return None
     p = subprocess.run(["python3", "-I", str(Path(WEFT) / "kalendar.py"), "merge"], capture_output=True, text=True,
-                       input=json.dumps({"base": master, "local": local}, ensure_ascii=False), timeout=120)
+                       input=json.dumps({"base": master, "local": {**master, "calendars": cals}}, ensure_ascii=False), timeout=120)
     return f"Weft calendar: {(p.stderr or p.stdout).strip()[-300:]}" if p.returncode else None
 
 def write(path, text):
@@ -239,6 +245,7 @@ def main(argv):
             else:
                 new = import_watch(con)
                 if new is None:
+                    if (why := to_weft()) and why != "off": print(why, file=sys.stderr)
                     print("Hodinky nie sú pripojené."); return 0
             nights, days = publish(con)
             bad = {p: c for p, c in new.items() if "error" in c}

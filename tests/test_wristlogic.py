@@ -158,6 +158,13 @@ class Edges(Base):
             self.assertIsNone(wristlogic.to_weft([], []))
             doc = json.loads((weft / "data/calendars.json").read_text())
             self.assertEqual((doc["calendars"][1]["visible"], doc["calendars"][1]["events"]), (False, []))
+            # Kalendarix's old subscription to the feed comes in from x270: the next run takes it out, nothing else.
+            doc["calendars"].append({"id": "kx-sub", "name": "Spánok", "sourceUrl": wristlogic.FEED, "events": []})
+            (weft / "data/calendars.json").write_text(json.dumps(doc))
+            self.assertIsNone(wristlogic.to_weft())
+            after = json.loads((weft / "data/calendars.json").read_text())
+            self.assertEqual([c["id"] for c in after["calendars"]], ["kx-1", wristlogic.CAL_ID])
+            self.assertEqual(after["calendars"][1]["visible"], False)
         finally:
             wristlogic.WEFT = ""
 

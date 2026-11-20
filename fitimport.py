@@ -85,7 +85,7 @@ def upgrade(path, archive):
     n = 1
     while backup.exists():
         n += 1; backup = path.with_name(f"{path.stem}.v{version}.{n}{path.suffix}")
-    os.replace(path, backup)
+    os.link(path, backup)   # the old one stays under both names until the new one takes its place in one step
     os.replace(tmp, path)
     return backup
 

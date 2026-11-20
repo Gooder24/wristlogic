@@ -321,6 +321,26 @@ class Edges(Base):
                "worn_h": 3.5, "full_day": False, "form": None}
         line = wristlogic.night_lines(n, day)[-2]
         self.assertEqual(line, "Včera: 3000 krokov, na ruke len 3,5 h, TRIMP a pohyb až po 12 h")
+        line = wristlogic.night_lines(n, {**day, "worn_h": 12.0})[-2]  # 11 h 59 min rounds to 12,0
+        self.assertIn("na ruke len 11,9 h", line)
+
+    def test_a_crash_after_the_upgrade_still_publishes_on_the_next_run(self):
+        data = self.dir / "data"; (data / "fit/garmin/Sleep").mkdir(parents=True)
+        sleep_file(data / "fit/garmin/Sleep/S.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 5), SleepLevel.AWAKE)])
+        self.old_database(data)
+        real = wristlogic.publish
+        def crash(con): raise KeyboardInterrupt
+        wristlogic.publish = crash
+        try:
+            with self.assertRaises(KeyboardInterrupt): self.upgrade(data)
+        finally:
+            wristlogic.publish = real
+        self.assertIsNone(fitimport.outdated(data / "wristlogic.db"))
+        self.assertTrue((data / "wristlogic.v1.db").exists())
+        self.assertFalse((data / "public/health.json").exists())
+        self.upgrade(data)
+        self.assertTrue((data / "public/health.json").exists())
+        self.assertFalse((data / ".publish").exists())
 
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),

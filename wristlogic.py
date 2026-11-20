@@ -30,13 +30,17 @@ def db():
     calendar and health.json follow at once (the old file stays beside it)."""
     DATA.mkdir(parents=True, exist_ok=True)
     path = DATA / "wristlogic.db"
+    stale = DATA / ".publish"  # an upgrade not yet published: publish on the next run, also after a crash
     with open(DATA / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        old = fitimport.upgrade(path, DATA / "fit") if fitimport.outdated(path) else None
-        con = fitimport.connect(path)
-        if old:
+        if fitimport.outdated(path):
+            stale.touch()
+            old = fitimport.upgrade(path, DATA / "fit")
             print(f"Databáza má novú podobu: prečítal som znova archív {DATA / 'fit'} (stará je {old.name}).", file=sys.stderr)
+        con = fitimport.connect(path)
+        if stale.exists():
             publish(con)
+            stale.unlink()
     return con
 
 EXPERIMENTAL = False  # config "experimental": recovery 0-100 and strain 0-21, our own estimates (register.py)
@@ -126,7 +130,7 @@ def night_lines(n, day=None):
         # TRIMP and minutes of movement come from heart rate over the whole day: shown only after 12 h on the wrist.
         moved = (f"TRIMP {day['trimp']}" + (f" (záťaž {num(day['strain'], 1)}/21, experimentálne)" if EXPERIMENTAL else "")
                  + f", pohyb {day['moderate_min']} min stredne + {day['vigorous_min']} min intenzívne"
-                 if day["full_day"] else f"na ruke len {num(day['worn_h'], 1)} h, TRIMP a pohyb až po 12 h")
+                 if day["full_day"] else f"na ruke len {num(min(day['worn_h'], 11.9), 1)} h, TRIMP a pohyb až po 12 h")
         lines.append(f"Včera: {num(day['steps'])} krokov, {moved}"
                      + (f", kondícia {day['fitness']}, forma {day['form']:+d}" if day["form"] is not None else ""))
     return lines + course  # the course is long: last, under the numbers
@@ -159,7 +163,7 @@ def table(nights, days, count):
         rows.append(f"{d['date']}  {hm(n['asleep']) if n else '–':>8} {round(n['deep'] / 60) if n else '–':>4} "
                     f"{round(n['rem'] / 60) if n else '–':>4} {num(g):>6} {num(n.get('rhr')):>4} {num(n.get('resp'), 1):>5} "
                     f"{num(n.get('hrv')):>5} {num(d['steps']):>6} {num(d['trimp'] if d['full_day'] else None):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}"
-                    + (f" {num(n.get('recovery')):>6} {num(d['strain'], 1):>6}" if EXPERIMENTAL else ""))
+                    + (f" {num(n.get('recovery')):>6} {num(d['strain'] if d['full_day'] else None, 1):>6}" if EXPERIMENTAL else ""))
     return "\n".join(rows)
 
 # ------------------------------------------------------------------ unlock

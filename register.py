@@ -66,7 +66,7 @@ def yesterday(c):
         day = c["days"][-2] if len(c["days"]) > 1 else None
     if day and day["full_day"]: return Gate(True)
     worn = day["worn_h"] if day else 0
-    return Gate(False, f"včera len {worn:.1f} h na ruke, treba 12 h".replace(".", ","))
+    return Gate(False, f"včera len {min(worn, 11.9):.1f} h na ruke, treba 12 h".replace(".", ","))  # 11,98 h is not 12
 
 def form(c):
     if c["days"] and c["days"][-1].get("form") is not None: return Gate(True)

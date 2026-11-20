@@ -268,6 +268,7 @@ def days(db, birth_year=None, rest=60):
         vo2 = db.execute("select value from samples where kind = 'vo2max' and ts < ? order by ts desc limit 1", (b,)).fetchone()
         out.append({"date": d.isoformat(), "steps": steps, "trimp": round(load), "strain": round(min(21, 7 * math.log1p(load / 25)), 1),
                     "moderate_min": round(moderate / 60), "vigorous_min": round(vigorous / 60), "worn_h": round(worn / 3600, 1),
+                    "full_day": worn >= 12 * 3600,
                     "stress": round(statistics.fmean(stress)) if stress else None,
                     **({"fitness": round(fitness), "fatigue": round(fatigue), "form": round(fitness - fatigue)}
                        if worn_days >= 28 else {"fitness": None, "fatigue": None, "form": None}),

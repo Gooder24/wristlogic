@@ -37,7 +37,8 @@ class FakeWatch(unittest.TestCase):
             self.assertLess(n["rhr"], 56)
 
     def test_recovery_needs_a_baseline_and_reads_the_last_night_as_ill(self):
-        nights = self.health["nights"]
+        import metrics
+        nights = metrics.nights(sqlite3.connect(Path(self.tmp.name) / "data/wristlogic.db"))
         self.assertTrue(all(n["recovery"] is None for n in nights[:4]))
         self.assertTrue(all(n["recovery"] is not None for n in nights[4:]))
         self.assertTrue(nights[-1]["ill"])
@@ -140,7 +141,7 @@ def sleep_file(path, stages, assessment=None, window=None):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.dir = Path(self.tmp.name)
-        self.db, _ = fitimport.connect(self.dir / "z.db")
+        self.db = fitimport.connect(self.dir / "z.db")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -248,7 +249,78 @@ class Edges(Base):
         [s] = metrics.sleeps(con)
         self.assertEqual(s["wake"], int(at(11, 4).timestamp()))
         self.assertEqual(con.execute("select distinct src from samples").fetchall(), [("garmin/Sleep/S.fit",)])
-        self.assertEqual(fitimport.connect(data / "wristlogic.db")[1], None)  # once rebuilt, it stays
+        self.assertIsNone(fitimport.outdated(data / "wristlogic.db"))  # once rebuilt, it stays
+        self.assertTrue((data / "public/health.json").exists())  # and published at once
+
+    def old_database(self, data, files=()):
+        data.mkdir(parents=True, exist_ok=True)
+        old = sqlite3.connect(data / "wristlogic.db")
+        old.execute("create table samples (kind text, ts integer, value real, src text, primary key (kind, ts))")
+        old.execute("create table files (sha text primary key, path text not null, imported_at integer not null, counts text)")
+        old.executemany("insert into files values (?, ?, 0, '{}')", [(str(i), str(f)) for i, f in enumerate(files)])
+        old.commit(); old.close()
+
+    def upgrade(self, data):
+        before = wristlogic.DATA
+        wristlogic.DATA = data
+        try: return wristlogic.db()
+        finally: wristlogic.DATA = before
+
+    def test_the_rebuild_keeps_files_read_from_another_folder(self):
+        export = self.dir / "export"; export.mkdir()
+        sleep_file(export / "S.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 5), SleepLevel.AWAKE)])
+        data = self.dir / "data"; self.old_database(data, [export / "S.fit"])
+        con = self.upgrade(data)
+        self.assertEqual(len(metrics.sleeps(con)), 1)
+
+    def test_an_interrupted_rebuild_leaves_the_old_database_and_runs_again(self):
+        data = self.dir / "data"; (data / "fit/garmin/Sleep").mkdir(parents=True)
+        sleep_file(data / "fit/garmin/Sleep/S.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 5), SleepLevel.AWAKE)])
+        self.old_database(data)
+        real = fitimport.import_files
+        def broken(*a): raise KeyboardInterrupt
+        fitimport.import_files = broken
+        try:
+            with self.assertRaises(KeyboardInterrupt): self.upgrade(data)
+        finally:
+            fitimport.import_files = real
+        self.assertEqual(fitimport.outdated(data / "wristlogic.db"), 1)
+        self.assertEqual(len(metrics.sleeps(self.upgrade(data))), 1)
+
+    def test_the_watchs_first_copy_comes_before_its_later_versions_with_equal_times(self):
+        sleep = self.dir / "fit/garmin/Sleep"; sleep.mkdir(parents=True)
+        sleep_file(sleep / "S.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 5), SleepLevel.AWAKE)])
+        sleep_file(sleep / "S.0123abcd.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 6), SleepLevel.AWAKE)])
+        for f in sleep.iterdir(): os.utime(f, (5, 5))
+        self.assertEqual([src for _, src in fitimport.archived(self.dir / "fit")], ["garmin/Sleep/S.fit"] * 2)
+        self.assertEqual(fitimport.archived(self.dir / "fit")[0][0].name, "S.fit")
+
+    def test_two_heart_rate_samples_hours_apart_do_not_cover_the_day(self):
+        b = FitFileBuilder(auto_define=True)
+        for t in (at(10, 2), at(10, 22)):
+            i = MonitoringInfoMessage(); i.timestamp = int(t.timestamp() * 1000); b.add(i)
+            m = MonitoringMessage(); m.timestamp = int(t.timestamp() * 1000); m.heart_rate = 60; b.add(m)
+        b.build().to_file(str(self.dir / "m.fit"))
+        self.load("m.fit")
+        [(covered,)] = self.db.execute("select covered from coverage where kind = 'hr'").fetchall()
+        self.assertLess(covered, 0.05)
+
+    def test_a_gate_opens_exactly_when_the_night_shows_its_number(self):
+        import register
+        [n] = self.instinct_night()
+        days = metrics.days(self.db)
+        gates = {m.id: g for m, g in register.status([n], days, {"sleep": 4})}
+        text = "\n".join(wristlogic.night_lines(n))
+        self.assertTrue(gates["stages"].open and "Fázy:" in text)
+        self.assertFalse(gates["rhr"].open); self.assertNotIn("Kľudový tep", text)  # no heart rate in the file
+        self.assertFalse(gates["parts"].open); self.assertNotIn("bežne", text)
+        self.assertFalse(gates["sleep_score"].open); self.assertNotIn("Garmin skóre", text)
+        self.assertFalse(gates["trimp"].open)
+        self.assertEqual(gates["debt"].why, "1 z 4 nocí za posledných 7: ešte 3")
+        day = {"date": "2026-11-10", "steps": 3000, "trimp": 0, "strain": 0, "moderate_min": 0, "vigorous_min": 0,
+               "worn_h": 3.5, "full_day": False, "form": None}
+        line = wristlogic.night_lines(n, day)[-2]
+        self.assertEqual(line, "Včera: 3000 krokov, na ruke len 3,5 h, TRIMP a pohyb až po 12 h")
 
     def test_change_records_keep_their_whole_length(self):
         sleep_file(self.dir / "a.fit", [(at(10, 23), SleepLevel.LIGHT), (at(11, 0), SleepLevel.DEEP),

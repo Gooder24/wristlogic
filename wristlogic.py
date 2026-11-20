@@ -26,14 +26,17 @@ def config():
     except FileNotFoundError: return {}
 
 def db():
-    """The database; one of an older schema is rebuilt from the archive of FIT files (the old file stays beside it)."""
+    """The database. One of an older shape is built again from the files it had read, then published, so the
+    calendar and health.json follow at once (the old file stays beside it)."""
     DATA.mkdir(parents=True, exist_ok=True)
+    path = DATA / "wristlogic.db"
     with open(DATA / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        con, old = fitimport.connect(DATA / "wristlogic.db")
+        old = fitimport.upgrade(path, DATA / "fit") if fitimport.outdated(path) else None
+        con = fitimport.connect(path)
         if old:
-            fitimport.import_files(con, fitimport.archived(DATA / "fit"))
             print(f"Databáza má novú podobu: prečítal som znova archív {DATA / 'fit'} (stará je {old.name}).", file=sys.stderr)
+            publish(con)
     return con
 
 EXPERIMENTAL = False  # config "experimental": recovery 0-100 and strain 0-21, our own estimates (register.py)
@@ -120,9 +123,11 @@ def night_lines(n, day=None):
         if n.get("sri") is not None: lines.append(f"Pravidelnosť spánku za 7 dní (SRI) {n['sri']} zo 100")
         if n.get("ill"): lines.append("Pozor: kľudový tep aj dych sú výrazne nad tvojím priemerom (býva to pred chorobou alebo po alkohole)")
     if day:
-        lines.append(f"Včera: {num(day['steps'])} krokov, TRIMP {day['trimp']}"
-                     + (f" (záťaž {num(day['strain'], 1)}/21, experimentálne)" if EXPERIMENTAL else "") + ", "
-                     f"pohyb {day['moderate_min']} min stredne + {day['vigorous_min']} min intenzívne"
+        # TRIMP and minutes of movement come from heart rate over the whole day: shown only after 12 h on the wrist.
+        moved = (f"TRIMP {day['trimp']}" + (f" (záťaž {num(day['strain'], 1)}/21, experimentálne)" if EXPERIMENTAL else "")
+                 + f", pohyb {day['moderate_min']} min stredne + {day['vigorous_min']} min intenzívne"
+                 if day["full_day"] else f"na ruke len {num(day['worn_h'], 1)} h, TRIMP a pohyb až po 12 h")
+        lines.append(f"Včera: {num(day['steps'])} krokov, {moved}"
                      + (f", kondícia {day['fitness']}, forma {day['form']:+d}" if day["form"] is not None else ""))
     return lines + course  # the course is long: last, under the numbers
 
@@ -141,7 +146,7 @@ def report(nights, days, count=1):
         out.append(f"{DAYS[wake.weekday()]} {wake.day}. {wake.month}.  " + "\n  ".join(night_lines(n, day)))
     if days:
         d = days[-1]
-        out.append(f"Dnes {d['date']}: {num(d['steps'])} krokov, TRIMP {d['trimp']}, stres {num(d['stress'])}, "
+        out.append(f"Dnes {d['date']}: {num(d['steps'])} krokov, TRIMP zatiaľ {d['trimp']}, stres {num(d['stress'])}, "
                    f"VO₂max {num(d['vo2max'])}, nosené {num(d['worn_h'], 1)} h")
     return "\n\n".join(out)
 
@@ -153,7 +158,7 @@ def table(nights, days, count):
         g = (n.get("garmin") or {}).get("overall_sleep_score")
         rows.append(f"{d['date']}  {hm(n['asleep']) if n else '–':>8} {round(n['deep'] / 60) if n else '–':>4} "
                     f"{round(n['rem'] / 60) if n else '–':>4} {num(g):>6} {num(n.get('rhr')):>4} {num(n.get('resp'), 1):>5} "
-                    f"{num(n.get('hrv')):>5} {num(d['steps']):>6} {num(d['trimp']):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}"
+                    f"{num(n.get('hrv')):>5} {num(d['steps']):>6} {num(d['trimp'] if d['full_day'] else None):>6} {'–' if d['form'] is None else f"{d['form']:+d}":>6}"
                     + (f" {num(n.get('recovery')):>6} {num(d['strain'], 1):>6}" if EXPERIMENTAL else ""))
     return "\n".join(rows)
 
@@ -287,10 +292,14 @@ def publish(con):
     public = DATA / "public"
     public.mkdir(parents=True, exist_ok=True)
     write(public / "spanok.ics", ics(nights, days))
-    plain = [{k: v for k, v in n.items() if k != "spans"} for n in nights]
-    gates = [{"id": m.id, "name": m.name, "method": m.method, "trust": m.trust, "open": g.open, "why": g.why,
-              "have": g.have, "need": g.need} for m, g in register.status(nights, days, sample_counts(con))]
-    write(public / "health.json", json.dumps({"devices": devices(con), "metrics": gates, "nights": plain, "days": days},
+    # Our own estimates (trust C) leave only with "experimental": true.
+    hidden = {"spans"} | (set() if EXPERIMENTAL else {"recovery", "strain"})
+    plain = [{k: v for k, v in n.items() if k not in hidden} for n in nights]
+    daily = [{k: v for k, v in d.items() if k not in hidden} for d in days]
+    gates = [{"id": m.id, "name": m.name, "method": m.method, "trust": m.trust, "shown": m.trust != "C" or EXPERIMENTAL,
+              "open": g.open, "why": g.why, "have": g.have, "need": g.need}
+             for m, g in register.status(nights, days, sample_counts(con))]
+    write(public / "health.json", json.dumps({"devices": devices(con), "metrics": gates, "nights": plain, "days": daily},
                                              ensure_ascii=False))
     if (why := to_weft(nights, days)) and why != "off": print(why, file=sys.stderr)
     return nights, days

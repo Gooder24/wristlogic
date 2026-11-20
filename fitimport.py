@@ -46,21 +46,48 @@ create table if not exists coverage (device text not null, kind text not null, d
 """
 
 def connect(path):
-    """The database at `path`. One of an older schema is moved aside as <name>.v<old version>.db and a new one made:
-    `rebuild` then fills it again from the archive of FIT files. Returns (db, the old file or None)."""
-    path, old = Path(path), None
-    if path.exists():
-        probe = sqlite3.connect(path)
-        version = probe.execute("pragma user_version").fetchone()[0]
-        tables = {r[0] for r in probe.execute("select name from sqlite_master where type = 'table'")}
-        probe.close()
-        if version < VERSION and tables:
-            old = path.with_name(f"{path.stem}.v{version or 1}{path.suffix}")
-            os.replace(path, old)
     db = sqlite3.connect(path)
     db.executescript(SCHEMA)
     db.execute(f"pragma user_version = {VERSION}")
-    return db, old
+    return db
+
+def outdated(path):
+    """The schema version of an older database at `path`, or None when there is none or it is current."""
+    if not Path(path).exists(): return None
+    probe = sqlite3.connect(path)
+    try:
+        version = probe.execute("pragma user_version").fetchone()[0]
+        tables = {r[0] for r in probe.execute("select name from sqlite_master where type = 'table'")}
+    finally:
+        probe.close()
+    return (version or 1) if version < VERSION and "samples" in tables else None
+
+def upgrade(path, archive):
+    """Builds a current database beside an outdated one at `path` from every file it had read: the archive (fit/),
+    then the files read from other folders that are still where they were. Only a finished build takes the old
+    one's place; the old one stays as <name>.v<version>.db. Returns that file."""
+    path = Path(path)
+    version = outdated(path)
+    old = sqlite3.connect(path)
+    try: paths = [Path(p) for (p,) in old.execute("select path from files")]
+    except sqlite3.OperationalError: paths = []  # no files table
+    finally: old.close()
+    archive = Path(archive).resolve()
+    items = archived(archive)
+    seen = {Path(p).resolve() for p, _ in items}
+    items += [(p, str(p)) for p in paths if p.is_file() and p.resolve() not in seen and archive not in p.resolve().parents]
+    tmp = path.with_name(f"{path.stem}.upgrade{path.suffix}")
+    tmp.unlink(missing_ok=True)
+    db = connect(tmp)
+    import_files(db, items)
+    db.close()
+    backup = path.with_name(f"{path.stem}.v{version}{path.suffix}")
+    n = 1
+    while backup.exists():
+        n += 1; backup = path.with_name(f"{path.stem}.v{version}.{n}{path.suffix}")
+    os.replace(path, backup)
+    os.replace(tmp, path)
+    return backup
 
 def archived(archive):
     """(path, src) of every file in the archive (fit/<watch>/...), oldest copy first, so a newer version of a file
@@ -71,8 +98,9 @@ def archived(archive):
         if p.is_file() and p.suffix.lower() == ".fit":
             rel = p.relative_to(archive)
             name = re.sub(r"\.[0-9a-f]{8}(\.fit)$", r"\1", rel.name, flags=re.I)  # keep_copy's name for a newer version
-            items.append((p.stat().st_mtime, str(p), (p, str(rel.with_name(name)))))
-    return [item for _, _, item in sorted(items)]
+            # The watch's first copy keeps the plain name; later versions came after it, by the time they were copied.
+            items.append((name != rel.name, p.stat().st_mtime, str(p), (p, str(rel.with_name(name)))))
+    return [item for *_, item in sorted(items)]
 
 def unix(fit_ts):
     return int(fit_ts) + FIT_EPOCH
@@ -186,10 +214,10 @@ def rows(messages):
     return samples, assessments, activities
 
 def store(db, src, dev, samples, assessments, activities):
-    """A file's rows in place of what an earlier version of the same file (`src`) gave."""
-    for table in ("samples", "assess", "activities"):
-        db.execute(f"delete from {table} where src = ?", (src,))
+    """A file's rows in place of what an earlier version of the same file (`src`, of the same device) gave."""
     serial = dev["serial"]
+    for table in ("samples", "assess", "activities"):
+        db.execute(f"delete from {table} where src = ? and device = ?", (src, serial))
     db.executemany("insert or replace into samples values (?, ?, ?, ?, ?)", [(serial, *r, src) for r in samples])
     db.executemany("insert or replace into assess values (?, ?, ?, ?)", [(*r, src, serial) for r in assessments])
     db.executemany("insert or replace into activities values (?, ?, ?, ?)", [(*r, src, serial) for r in activities])
@@ -204,7 +232,8 @@ def store(db, src, dev, samples, assessments, activities):
 
 TZ = ZoneInfo("Europe/Bratislava")
 DENSE = ("hr", "stress", "resp", "spo2", "hrv5", "battery")  # and cycles:*: signals measured over time, not daily values
-STAND = 300  # a sample covers the time until the next one, at most this long or two of its usual steps
+STAND, LONGEST = 300, 1800  # a sample covers the time until the next one: at most two of its usual steps, at least
+                            # STAND, and never more than LONGEST (two samples hours apart do not cover the day)
 
 def coverage(db):
     """Fills `coverage` again: per device, signal and local day, the samples, their median step and the share of
@@ -221,7 +250,7 @@ def coverage(db):
         for day, ts in days.items():
             steps = [b - a for a, b in zip(ts, ts[1:])]
             period = int(statistics.median(steps)) if steps else 0
-            stand = max(STAND, 2 * period)
+            stand = min(LONGEST, max(STAND, 2 * period))
             covered = sum(min(s, stand) for s in steps) + min(stand, 60)
             out.append((dev, kind, day, len(ts), period, round(min(1.0, covered / 86400), 3)))
     db.executemany("insert into coverage values (?, ?, ?, ?, ?, ?)", out)

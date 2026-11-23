@@ -12,7 +12,10 @@ fi
 [ -x .venv/bin/python ] || python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 mkdir -p ~/.config/systemd/user ~/.local/bin
-cp systemd/* ~/.config/systemd/user/
+# The web service listens on this machine's Tailscale address, or on localhost without Tailscale.
+bind=$(tailscale ip -4 2>/dev/null | head -n1) || true
+[ -n "$bind" ] || bind=127.0.0.1
+for f in systemd/*; do sed "s/@BIND@/$bind/" "$f" > ~/.config/systemd/user/"${f#systemd/}"; done
 printf '#!/bin/sh\nexec %s/.venv/bin/python %s/wristlogic.py "$@"\n' "$PWD" "$PWD" > ~/.local/bin/wristlogic
 chmod +x ~/.local/bin/wristlogic
 systemctl --user daemon-reload

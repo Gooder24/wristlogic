@@ -211,7 +211,7 @@ class Edges(Base):
             doc = json.loads((weft / "data/calendars.json").read_text())
             self.assertEqual((doc["calendars"][1]["visible"], doc["calendars"][1]["events"]), (False, []))
             # Kalendarix's old subscription to the feed comes in from x270: the next run takes it out, nothing else.
-            doc["calendars"].append({"id": "kx-sub", "name": "Spánok", "sourceUrl": wristlogic.FEED, "events": []})
+            doc["calendars"].append({"id": "kx-sub", "name": "Spánok", "sourceUrl": "http://100.64.0.1" + wristlogic.FEED, "events": []})
             (weft / "data/calendars.json").write_text(json.dumps(doc))
             self.assertIsNone(wristlogic.to_weft())
             after = json.loads((weft / "data/calendars.json").read_text())
@@ -222,15 +222,15 @@ class Edges(Base):
 
     def test_hrv_of_each_five_minutes_and_battery_under_their_watch(self):
         b = FitFileBuilder(auto_define=True)
-        f = FileIdMessage(); f.serial_number = 3424819929; f.manufacturer = 1; f.product = 3888; f.time_created = int(at(11, 6).timestamp() * 1000); b.add(f)
+        f = FileIdMessage(); f.serial_number = 1234567890; f.manufacturer = 1; f.product = 3888; f.time_created = int(at(11, 6).timestamp() * 1000); b.add(f)
         h = HrvValueMessage(); h.timestamp = int(at(11, 2).timestamp() * 1000); h.value = 69.0; b.add(h)
         c = BatteryMessage(); c.timestamp = int(at(11, 6).timestamp() * 1000); c.capacity = 93; b.add(c)
         b.build().to_file(str(self.dir / "h.fit"))
         self.load("h.fit")
         rows = self.db.execute("select device, kind, value from samples order by kind").fetchall()
-        self.assertEqual(rows, [("3424819929", "battery", 93.0), ("3424819929", "hrv5", 69.0)])
+        self.assertEqual(rows, [("1234567890", "battery", 93.0), ("1234567890", "hrv5", 69.0)])
         self.assertEqual(self.db.execute("select serial, model, first_seen from devices").fetchall(),
-                         [("3424819929", "instinct_2", int(at(11, 6).timestamp()))])
+                         [("1234567890", "instinct_2", int(at(11, 6).timestamp()))])
 
     def test_an_old_database_is_rebuilt_from_the_archive(self):
         data = self.dir / "data"; sleep = data / "fit/garmin/Sleep"; sleep.mkdir(parents=True)

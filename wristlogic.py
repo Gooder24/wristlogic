@@ -264,7 +264,7 @@ def iso(ts):
 
 # Kalendarix's earlier subscription to the feed: this calendar replaces it, so it is taken out of Weft's calendar
 # (the merge then takes it out of Kalendarix on x270 as well) and the nights do not show twice.
-FEED = "http://100.110.180.15:8791/spanok.ics"
+FEED = ":8791/spanok.ics"  # the end of the old feed's address, on whichever machine served it
 
 def to_weft(nights=None, days=()):
     """Puts the calendar Spánok into Weft's calendar through its three-way merge, so Karchi's own changes
@@ -273,7 +273,7 @@ def to_weft(nights=None, days=()):
     if not WEFT: return "off"
     try: master = json.loads((Path(WEFT) / "data/calendars.json").read_text())
     except FileNotFoundError: return "no Weft calendar"
-    cals = [c for c in master.get("calendars") or [] if c.get("sourceUrl") != FEED]
+    cals = [c for c in master.get("calendars") or [] if not (c.get("sourceUrl") or "").endswith(FEED)]
     if nights is not None:
         old = next((c for c in cals if c.get("id") == CAL_ID), None)
         events = [{"uid": uid, "title": title, "description": text, "notes": text, "location": "", "start": iso(start),

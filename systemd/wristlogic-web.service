@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 ExecStartPre=/bin/mkdir -p %h/.local/share/wristlogic/public
-ExecStart=/usr/bin/python3 -m http.server --bind 100.110.180.15 --directory %h/.local/share/wristlogic/public 8791
+ExecStart=/usr/bin/python3 -m http.server --bind @BIND@ --directory %h/.local/share/wristlogic/public 8791
 # Tailscale may come up after this does.
 Restart=always
 RestartSec=30

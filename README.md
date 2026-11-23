@@ -1,7 +1,7 @@
 # wristlogic
 
-What a watch measures, worked out with published algorithms: the engine under the Ownbeat app
-planned in `navrh/`.
+What a watch measures, worked out with published algorithms: the engine under the Ownbeat app.
+Ownbeat is no longer pursued (23 Nov 2026); its plan and research are in [`idea/`](idea/README.md) for anyone to take.
 
 Sleep and health from Karchi's Garmin Instinct 2, local only (no Garmin Connect). Plugged into asus, the
 watch is mounted over MTP, every FIT file it has is kept in `~/.local/share/wristlogic/fit/` (the watch deletes
